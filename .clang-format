@@ -1,0 +1,126 @@
+BasedOnStyle: LLVM
+TabWidth: 2
+IndentWidth: 2
+PPIndentWidth: -1
+UseTab: Never
+ColumnLimit: 100
+LineEnding: DeriveLF
+PointerAlignment: Right
+PenaltyBreakAssignment: 20
+PenaltyBreakBeforeFirstCallParameter: 100
+PenaltyBreakBeforeMemberAccess: 100
+PenaltyBreakComment: 100
+PenaltyBreakFirstLessLess: 0
+PenaltyBreakOpenParenthesis: 10
+PenaltyBreakString: 100
+PenaltyExcessCharacter: 5
+PenaltyIndentedWhitespace: 0
+PenaltyReturnTypeOnItsOwnLine: 0
+AlignAfterOpenBracket: Align
+AlignArrayOfStructures: Right
+AlignConsecutiveAssignments: Consecutive
+AlignConsecutiveBitFields: Consecutive
+AlignConsecutiveDeclarations: None
+AlignConsecutiveMacros: Consecutive
+AlignEscapedNewlines: Left
+AlignOperands: AlignAfterOperator
+AlignTrailingComments: Leave
+AllowAllArgumentsOnNextLine: false
+AllowAllParametersOfDeclarationOnNextLine: false
+AllowShortBlocksOnASingleLine: Empty
+AllowShortCaseLabelsOnASingleLine: true
+AllowShortEnumsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: Empty
+AllowShortIfStatementsOnASingleLine: WithoutElse
+AllowShortLoopsOnASingleLine: true
+AlwaysBreakBeforeMultilineStrings: false
+BinPackArguments: false
+BinPackParameters: OnePerLine
+BitFieldColonSpacing: Both
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterCaseLabel: true
+  AfterControlStatement: Always
+  AfterEnum: true
+  AfterFunction: true
+  AfterObjCDeclaration: false
+  AfterStruct: true
+  AfterUnion: true
+  AfterExternBlock: true
+  BeforeElse: true
+  BeforeWhile: false
+  IndentBraces: false
+  SplitEmptyFunction: true
+BracedInitializerIndentWidth: 2
+BreakAdjacentStringLiterals: true
+BreakAfterReturnType: AllDefinitions
+BreakBeforeBinaryOperators: None
+BreakBeforeInlineASMColon: OnlyMultiline
+BreakBeforeTernaryOperators: true
+BreakBinaryOperations: RespectPrecedence
+BreakFunctionDefinitionParameters: false
+BreakStringLiterals: true
+CommentPragmas: ''
+ContinuationIndentWidth: 0
+Cpp11BracedListStyle: false
+DerivePointerAlignment: false
+IncludeBlocks: Preserve
+IndentCaseBlocks: false
+IndentCaseLabels: true
+IndentExternBlock: false
+IndentGotoLabels: true
+IndentPPDirectives: AfterHash
+IndentWrappedFunctionNames: true
+InsertBraces: false
+InsertNewlineAtEOF: true
+KeepEmptyLines:
+  AtEndOfFile: true
+  AtStartOfBlock: false
+  AtStartOfFile: true
+#MacroBlockBegin:
+#MacroBlockEnd:
+MaxEmptyLinesToKeep: 1
+ReferenceAlignment: Right
+ReflowComments: Never
+RemoveEmptyLinesInUnwrappedLines: true
+RemoveParentheses: Leave
+RemoveSemicolon: false
+SeparateDefinitionBlocks: Leave
+SortIncludes: CaseInsensitive
+SpaceAfterCStyleCast: false
+SpaceAfterLogicalNot: false
+SpaceAroundPointerQualifiers: Default
+SpaceBeforeAssignmentOperators: true
+SpaceBeforeCaseColon: false
+SpaceBeforeParens: ControlStatements
+SpaceBeforeSquareBrackets: false
+SpaceInEmptyBlock: false
+SpacesBeforeTrailingComments: 1
+SpacesInContainerLiterals: false
+SpacesInLineCommentPrefix:
+  Minimum: 1
+  Maximum: -1
+SpacesInParens: Never
+SpacesInSquareBrackets: false
+---
+Language: ObjC
+ColumnLimit: 100
+ObjCBinPackProtocolList: Auto
+ObjCBlockIndentWidth: 2
+ObjCBreakBeforeNestedBlockParam: true
+ObjCSpaceAfterProperty: true
+ObjCSpaceBeforeProtocolList: true
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterCaseLabel: true
+  AfterControlStatement: Never
+  AfterEnum: false
+  AfterFunction: false
+  AfterObjCDeclaration: false
+  AfterStruct: true
+  AfterUnion: true
+  AfterExternBlock: true
+  BeforeElse: false
+  BeforeWhile: false
+  IndentBraces: false
+  SplitEmptyFunction: true
