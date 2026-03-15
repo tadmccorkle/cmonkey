@@ -1,5 +1,6 @@
 #include <ctype.h>
 #include <stdatomic.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -22,7 +23,7 @@
 #define max(A, B)      (((A) > (B)) ? (A) : (B))
 #define clamp(A, X, B) (((X) < (A)) ? (A) : ((X) > (B)) ? (B) : (X))
 
-#define align_up(p, a) (((u64)(p) + ((u64)(a) - 1)) & (~((u64)(a) - 1)))
+#define align_up(p, a) (((usize)(p) + ((usize)(a) - 1)) & (~((usize)(a) - 1)))
 
 #define arr_count(a) sizeof(a) / sizeof(*a)
 
@@ -46,7 +47,19 @@ typedef s64 b64;
 typedef float f32;
 typedef double f64;
 
-internal u64
+#if (defined(_MSC_VER) && _MSC_VER < 1800) || (!defined(_MSC_VER) && !defined(__STDC_VERSION__))
+#  ifndef true
+#    define true (0 == 0)
+#  endif
+#  ifndef false
+#    define false (0 != 0)
+#  endif
+typedef b8 bool;
+#else
+#  include <stdbool.h>
+#endif
+
+internal usize
 cstr_length(cstr c)
 {
   cstr p = c;
@@ -58,7 +71,7 @@ typedef struct Str8 Str8;
 struct Str8
 {
   u8 *buf;
-  u64 len;
+  usize len;
 };
 
 #define str8_lit(S) (Str8){ (u8 *)(S), sizeof(S) - 1 }
@@ -66,7 +79,7 @@ struct Str8
 #define str8_fmt(S) (u32)(S).len, (S).buf
 
 internal Str8
-str8(u8 *value, u64 length)
+str8(u8 *value, usize length)
 {
   return (Str8){ value, length };
 }
@@ -94,7 +107,7 @@ struct ArenaBlock
   ArenaBlock *prev;
   usize size;
   usize pos;
-  u8 *data;
+  u8 data[];
 };
 
 typedef struct Arena Arena;
@@ -217,7 +230,7 @@ is_whitespace(u8 ch)
 internal b32
 all_whitespace(Str8 str)
 {
-  for (u32 i = 0; i < str.len; i++)
+  for (usize i = 0; i < str.len; i++)
   {
     if (!is_whitespace(str.buf[i]))
     {
@@ -240,62 +253,62 @@ is_letter(u8 ch)
 }
 
 #define TOKEN_KINDS(X)         \
-  X(TokenType_Illegal)         \
-  X(TokenType_EOF)             \
+  X(TokenKind_Illegal)         \
+  X(TokenKind_EOF)             \
                                \
   /* identifiers & literals */ \
-  X(TokenType_Identifier)      \
-  X(TokenType_Number)          \
+  X(TokenKind_Identifier)      \
+  X(TokenKind_Number)          \
                                \
   /* operators */              \
-  X(TokenType_Assign)          \
-  X(TokenType_Plus)            \
-  X(TokenType_Minus)           \
-  X(TokenType_Bang)            \
-  X(TokenType_Star)            \
-  X(TokenType_Slash)           \
-  X(TokenType_Less)            \
-  X(TokenType_Greater)         \
-  X(TokenType_Equal)           \
-  X(TokenType_NotEqual)        \
+  X(TokenKind_Assign)          \
+  X(TokenKind_Plus)            \
+  X(TokenKind_Minus)           \
+  X(TokenKind_Bang)            \
+  X(TokenKind_Star)            \
+  X(TokenKind_Slash)           \
+  X(TokenKind_Less)            \
+  X(TokenKind_Greater)         \
+  X(TokenKind_Equal)           \
+  X(TokenKind_NotEqual)        \
                                \
   /* delimiters */             \
-  X(TokenType_Comma)           \
-  X(TokenType_Semicolon)       \
-  X(TokenType_LParen)          \
-  X(TokenType_RParen)          \
-  X(TokenType_LBrace)          \
-  X(TokenType_RBrace)          \
-  X(TokenType_LBracket)        \
-  X(TokenType_RBracket)        \
+  X(TokenKind_Comma)           \
+  X(TokenKind_Semicolon)       \
+  X(TokenKind_LParen)          \
+  X(TokenKind_RParen)          \
+  X(TokenKind_LBrace)          \
+  X(TokenKind_RBrace)          \
+  X(TokenKind_LBracket)        \
+  X(TokenKind_RBracket)        \
                                \
   /* keywords */               \
-  X(TokenType_Function)        \
-  X(TokenType_Let)             \
-  X(TokenType_True)            \
-  X(TokenType_False)           \
-  X(TokenType_If)              \
-  X(TokenType_Else)            \
-  X(TokenType_Return)
+  X(TokenKind_Function)        \
+  X(TokenKind_Let)             \
+  X(TokenKind_True)            \
+  X(TokenKind_False)           \
+  X(TokenKind_If)              \
+  X(TokenKind_Else)            \
+  X(TokenKind_Return)
 
-typedef enum TokenType
+typedef enum
 {
 #define TOKEN_KIND(name) name,
   TOKEN_KINDS(TOKEN_KIND)
 #undef TOKEN_KIND
-  TokenType_COUNT
-} TokenType;
+  TokenKind_COUNT
+} TokenKind;
 
 internal Str8
-token_name(TokenType tokenType)
+token_name(TokenKind kind)
 {
-  switch (tokenType)
+  switch (kind)
   {
 #define TOKEN_KIND(name) \
   case name: return str8_lit(#name);
     TOKEN_KINDS(TOKEN_KIND)
 #undef TOKEN_KIND
-    default: return str8_lit("Unknown Token Type");
+    default: return str8_lit("Unknown Token Kind");
   }
 }
 
@@ -303,71 +316,31 @@ typedef struct Token Token;
 struct Token
 {
   Str8 value;
-  TokenType type;
-};
-
-typedef struct LexResult LexResult;
-struct LexResult
-{
-  Token *tokens;
-  u32 count;
-  b32 is_valid;
+  TokenKind kind;
 };
 
 Token keywords[] = {
-  {     str8_cti("fn"), TokenType_Function },
-  {    str8_cti("let"),      TokenType_Let },
-  {   str8_cti("true"),     TokenType_True },
-  {  str8_cti("false"),    TokenType_False },
-  {     str8_cti("if"),       TokenType_If },
-  {   str8_cti("else"),     TokenType_Else },
-  { str8_cti("return"),   TokenType_Return },
+  {     str8_cti("fn"), TokenKind_Function },
+  {    str8_cti("let"),      TokenKind_Let },
+  {   str8_cti("true"),     TokenKind_True },
+  {  str8_cti("false"),    TokenKind_False },
+  {     str8_cti("if"),       TokenKind_If },
+  {   str8_cti("else"),     TokenKind_Else },
+  { str8_cti("return"),   TokenKind_Return },
 };
 
 typedef struct Lexer Lexer;
 struct Lexer
 {
   Str8 input;
-  u32 pos;
+  usize pos;
 };
 
 internal void
-lex_free(LexResult l)
+lex_init(Lexer *l, Str8 input)
 {
-  free(l.tokens);
-}
-
-internal void
-lex_print(LexResult lex_result)
-{
-  for (u32 i = 0; i < lex_result.count; i++)
-  {
-    Token token = lex_result.tokens[i];
-    Str8 name   = token_name(token.type);
-    printf("%2d, %-30.*s %.*s\n", token.type, str8_fmt(name), str8_fmt(token.value));
-  }
-}
-
-internal u8
-lex_peek_char(Lexer *lexer)
-{
-  u32 next_pos = lexer->pos + 1;
-  if (next_pos >= lexer->input.len)
-  {
-    return 0;
-  }
-  return lexer->input.buf[next_pos];
-}
-
-internal void
-lex_push_token(Lexer *lexer, LexResult *lex_result, u32 length, TokenType type)
-{
-  lex_result->tokens[lex_result->count] = (Token){
-    .value = str8(&lexer->input.buf[lexer->pos], length),
-    .type  = type,
-  };
-  lex_result->count += 1;
-  lexer->pos += length;
+  l->input = input;
+  l->pos   = 0;
 }
 
 internal void
@@ -379,233 +352,133 @@ lex_consume_whitespace(Lexer *l)
   }
 }
 
-// TODO(tad): lexing can still operate on a string input (e.g., a file loaded from disk or interpreter input),
-// but it would be easier to use if its API was stream-like. Add functions for next_token, peek_token, etc.
-
-/*
-internal void
-lex_init(Lexer *l, Str8 input)
+internal u8
+lex_peek_char(Lexer *l)
 {
-  l->input = input;
-  l->pos   = 0;
+  usize next_pos = l->pos + 1;
+  if (next_pos >= l->input.len)
+  {
+    return 0;
+  }
+  return l->input.buf[next_pos];
+}
+
+internal void
+lex_init_token(Lexer *l, Token *token, usize length, TokenKind kind)
+{
+  token->value = str8(&l->input.buf[l->pos], length);
+  token->kind  = kind;
+  l->pos += length;
 }
 
 internal void
 lex_advance_token(Lexer *l, Token *token)
 {
-  LexResult result = { 0 };
+  lex_consume_whitespace(l);
 
-    lex_consume_whitespace(l);
-
-    if (l->pos >= l->input.len)
-    {
-      lex_push_token(l, &result, 0, TokenType_EOF);
-    }
-
-    if (result.count == capacity)
-    {
-      capacity *= 2;
-      result.tokens = (Token *)realloc(result.tokens, sizeof(*result.tokens) * capacity);
-    }
-
-    u8 ch = l.input.buf[l.pos];
-    switch (ch)
-    {
-      case '=':
-      {
-        if (lex_peek_char(&l) == '=')
-        {
-          lex_push_token(&l, &result, 2, TokenType_Equal);
-        }
-        else
-        {
-          lex_push_token(&l, &result, 1, TokenType_Assign);
-        }
-        break;
-      }
-      case '!':
-      {
-        if (lex_peek_char(&l) == '=')
-        {
-          lex_push_token(&l, &result, 2, TokenType_NotEqual);
-        }
-        else
-        {
-          lex_push_token(&l, &result, 1, TokenType_Bang);
-        }
-        break;
-      }
-      case '+': lex_push_token(&l, &result, 1, TokenType_Plus); break;
-      case '-': lex_push_token(&l, &result, 1, TokenType_Minus); break;
-      case '*': lex_push_token(&l, &result, 1, TokenType_Star); break;
-      case '/': lex_push_token(&l, &result, 1, TokenType_Slash); break;
-      case '<': lex_push_token(&l, &result, 1, TokenType_Less); break;
-      case '>': lex_push_token(&l, &result, 1, TokenType_Greater); break;
-      case ';': lex_push_token(&l, &result, 1, TokenType_Semicolon); break;
-      case '(': lex_push_token(&l, &result, 1, TokenType_LParen); break;
-      case ')': lex_push_token(&l, &result, 1, TokenType_RParen); break;
-      case '{': lex_push_token(&l, &result, 1, TokenType_LBrace); break;
-      case '}': lex_push_token(&l, &result, 1, TokenType_RBrace); break;
-      case ',': lex_push_token(&l, &result, 1, TokenType_Comma); break;
-      default:
-      {
-        u32 length = 0;
-        u32 pos    = l.pos;
-
-        if (is_digit(ch))
-        {
-          do length += 1;
-          while (pos < l.input.len && is_digit(l.input.buf[++pos]));
-
-          lex_push_token(&l, &result, length, TokenType_Number);
-        }
-        else if (ch == '_' || is_letter(ch))
-        {
-          do
-          {
-            length += 1;
-            ch = l.input.buf[++pos];
-          } while (pos < l.input.len && (ch == '_' || is_letter(ch) || is_digit(ch)));
-
-          TokenType type = TokenType_Identifier;
-          for (u32 i = 0; i < arr_count(keywords); i++)
-          {
-            Str8 keyword = keywords[i].value;
-
-            if (keyword.len > length) continue;
-
-            if (!memcmp(keyword.buf, &l.input.buf[l.pos], keyword.len))
-            {
-              type = keywords[i].type;
-            }
-          }
-
-          lex_push_token(&l, &result, length, type);
-        }
-        else
-        {
-          lex_push_token(&l, &result, 1, TokenType_Illegal);
-        }
-        break;
-      }
-    }
-}
-*/
-
-internal LexResult
-lex(Str8 input)
-{
-  Lexer l          = { .input = input };
-  LexResult result = { 0 };
-
-  u64 capacity  = 1024;
-  result.tokens = (Token *)malloc(sizeof(*result.tokens) * capacity);
-
-  for (;;)
+  if (l->pos >= l->input.len)
   {
-    lex_consume_whitespace(&l);
-
-    if (l.pos >= input.len)
-    {
-      if (result.count == capacity)
-      {
-        result.tokens = (Token *)realloc(result.tokens, sizeof(*result.tokens) + 1);
-      }
-
-      lex_push_token(&l, &result, 0, TokenType_EOF);
-      break;
-    }
-
-    if (result.count == capacity)
-    {
-      capacity *= 2;
-      result.tokens = (Token *)realloc(result.tokens, sizeof(*result.tokens) * capacity);
-    }
-
-    u8 ch = l.input.buf[l.pos];
-    switch (ch)
-    {
-      case '=':
-      {
-        if (lex_peek_char(&l) == '=')
-        {
-          lex_push_token(&l, &result, 2, TokenType_Equal);
-        }
-        else
-        {
-          lex_push_token(&l, &result, 1, TokenType_Assign);
-        }
-        break;
-      }
-      case '!':
-      {
-        if (lex_peek_char(&l) == '=')
-        {
-          lex_push_token(&l, &result, 2, TokenType_NotEqual);
-        }
-        else
-        {
-          lex_push_token(&l, &result, 1, TokenType_Bang);
-        }
-        break;
-      }
-      case '+': lex_push_token(&l, &result, 1, TokenType_Plus); break;
-      case '-': lex_push_token(&l, &result, 1, TokenType_Minus); break;
-      case '*': lex_push_token(&l, &result, 1, TokenType_Star); break;
-      case '/': lex_push_token(&l, &result, 1, TokenType_Slash); break;
-      case '<': lex_push_token(&l, &result, 1, TokenType_Less); break;
-      case '>': lex_push_token(&l, &result, 1, TokenType_Greater); break;
-      case ';': lex_push_token(&l, &result, 1, TokenType_Semicolon); break;
-      case '(': lex_push_token(&l, &result, 1, TokenType_LParen); break;
-      case ')': lex_push_token(&l, &result, 1, TokenType_RParen); break;
-      case '{': lex_push_token(&l, &result, 1, TokenType_LBrace); break;
-      case '}': lex_push_token(&l, &result, 1, TokenType_RBrace); break;
-      case ',': lex_push_token(&l, &result, 1, TokenType_Comma); break;
-      default:
-      {
-        u32 length = 0;
-        u32 pos    = l.pos;
-
-        if (is_digit(ch))
-        {
-          do length += 1;
-          while (pos < l.input.len && is_digit(l.input.buf[++pos]));
-
-          lex_push_token(&l, &result, length, TokenType_Number);
-        }
-        else if (ch == '_' || is_letter(ch))
-        {
-          do
-          {
-            length += 1;
-            ch = l.input.buf[++pos];
-          } while (pos < l.input.len && (ch == '_' || is_letter(ch) || is_digit(ch)));
-
-          TokenType type = TokenType_Identifier;
-          for (u32 i = 0; i < arr_count(keywords); i++)
-          {
-            Str8 keyword = keywords[i].value;
-
-            if (keyword.len > length) continue;
-
-            if (!memcmp(keyword.buf, &l.input.buf[l.pos], keyword.len))
-            {
-              type = keywords[i].type;
-            }
-          }
-
-          lex_push_token(&l, &result, length, type);
-        }
-        else
-        {
-          lex_push_token(&l, &result, 1, TokenType_Illegal);
-        }
-        break;
-      }
-    }
+    lex_init_token(l, token, 0, TokenKind_EOF);
+    return;
   }
 
-  return result;
+  u8 ch = l->input.buf[l->pos];
+  switch (ch)
+  {
+    case '=':
+    {
+      if (lex_peek_char(l) == '=')
+      {
+        lex_init_token(l, token, 2, TokenKind_Equal);
+      }
+      else
+      {
+        lex_init_token(l, token, 1, TokenKind_Assign);
+      }
+      break;
+    }
+    case '!':
+    {
+      if (lex_peek_char(l) == '=')
+      {
+        lex_init_token(l, token, 2, TokenKind_NotEqual);
+      }
+      else
+      {
+        lex_init_token(l, token, 1, TokenKind_Bang);
+      }
+      break;
+    }
+    case '+': lex_init_token(l, token, 1, TokenKind_Plus); break;
+    case '-': lex_init_token(l, token, 1, TokenKind_Minus); break;
+    case '*': lex_init_token(l, token, 1, TokenKind_Star); break;
+    case '/': lex_init_token(l, token, 1, TokenKind_Slash); break;
+    case '<': lex_init_token(l, token, 1, TokenKind_Less); break;
+    case '>': lex_init_token(l, token, 1, TokenKind_Greater); break;
+    case ';': lex_init_token(l, token, 1, TokenKind_Semicolon); break;
+    case '(': lex_init_token(l, token, 1, TokenKind_LParen); break;
+    case ')': lex_init_token(l, token, 1, TokenKind_RParen); break;
+    case '{': lex_init_token(l, token, 1, TokenKind_LBrace); break;
+    case '}': lex_init_token(l, token, 1, TokenKind_RBrace); break;
+    case ',': lex_init_token(l, token, 1, TokenKind_Comma); break;
+
+    default:
+    {
+      usize length = 0;
+      usize pos    = l->pos;
+
+      if (is_digit(ch))
+      {
+        do length += 1;
+        while (pos < l->input.len && is_digit(l->input.buf[++pos]));
+
+        lex_init_token(l, token, length, TokenKind_Number);
+      }
+      else if (ch == '_' || is_letter(ch))
+      {
+        do
+        {
+          length += 1;
+          ch = l->input.buf[++pos];
+        } while (pos < l->input.len && (ch == '_' || is_letter(ch) || is_digit(ch)));
+
+        TokenKind kind = TokenKind_Identifier;
+        for (usize i = 0; i < arr_count(keywords); i++)
+        {
+          Str8 keyword = keywords[i].value;
+
+          if (keyword.len > length) continue;
+
+          if (!memcmp(keyword.buf, &l->input.buf[l->pos], keyword.len))
+          {
+            kind = keywords[i].kind;
+          }
+        }
+
+        lex_init_token(l, token, length, kind);
+      }
+      else
+      {
+        lex_init_token(l, token, 1, TokenKind_Illegal);
+      }
+      break;
+    }
+  }
+}
+
+internal void
+lex_print(Str8 input)
+{
+  Lexer l     = { 0 };
+  Token token = { 0 };
+  lex_init(&l, input);
+
+  printf("id %-30s %s\n", "token", "value");
+  do
+  {
+    lex_advance_token(&l, &token);
+    printf("%2d %-30.*s %.*s\n", token.kind, str8_fmt(token_name(token.kind)), str8_fmt(token.value));
+  } while (token.kind != TokenKind_EOF);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -613,13 +486,13 @@ lex(Str8 input)
 
 typedef enum
 {
-  MessageKind_None,
-  MessageKind_Trace,
-  MessageKind_Info,
-  MessageKind_Warn,
-  MessageKind_Error,
-  MessageKind_Critical,
-  MessageKind_COUNT
+  MessageLevel_None,
+  MessageLevel_Trace,
+  MessageLevel_Info,
+  MessageLevel_Warn,
+  MessageLevel_Error,
+  MessageLevel_Critical,
+  MessageLevel_COUNT
 } MessageLevel;
 
 typedef struct Message Message;
@@ -642,14 +515,14 @@ typedef enum
   AstStmt_Let,
   // ...
   AstStmt_COUNT,
-} AstStmtType;
+} AstStmtKind;
 
 typedef enum
 {
   AstExpr_Identifier,
   // ...
   AstExpr_COUNT,
-} AstExprType;
+} AstExprKind;
 
 typedef struct AstExprIdentifier AstExprIdentifier;
 struct AstExprIdentifier
@@ -661,7 +534,7 @@ struct AstExprIdentifier
 typedef struct AstExpr AstExpr;
 struct AstExpr
 {
-  AstExprType tag;
+  AstExprKind tag;
   union
   {
     AstExprIdentifier identifier;
@@ -672,7 +545,7 @@ struct AstExpr
 typedef struct AstStmt AstStmt;
 struct AstStmt
 {
-  AstStmtType tag;
+  AstStmtKind tag;
   AstStmt *next;
   union
   {
@@ -689,8 +562,11 @@ struct AstStmt
 typedef struct Parser Parser;
 struct Parser
 {
-  LexResult l;
-  u32 pos;
+  Lexer l;
+  Token curr_token;
+  Token peek_token;
+
+  Arena *arena;
 };
 
 typedef struct ParseResult ParseResult;
@@ -703,84 +579,134 @@ struct ParseResult
 };
 
 internal void
+parse_init(Parser *p, Str8 input, Arena *arena)
+{
+  p->arena = arena;
+
+  lex_init(&p->l, input);
+  lex_advance_token(&p->l, &p->curr_token);
+  lex_advance_token(&p->l, &p->peek_token);
+}
+
+internal void
+parse_advance_token(Parser *p)
+{
+  p->curr_token = p->peek_token;
+  lex_advance_token(&p->l, &p->peek_token);
+}
+
+internal b32
+parse_expect_token(Parser *p, TokenKind kind)
+{
+  if (p->peek_token.kind == kind)
+  {
+    parse_advance_token(p);
+    return true;
+  }
+  return false;
+}
+
+internal void
 parse_free(ParseResult p)
 {
   arena_free(p.arena);
 }
 
 internal ParseResult
-parse(LexResult lex_result)
+parse(Str8 input)
 {
-  Parser p           = { .l = lex_result };
-  ParseResult result = { .arena = arena_alloc(KiB(4)) };
+  ParseResult result = { 0 };
+  result.arena       = arena_alloc(KiB(4));
+
+  Parser p = { 0 };
+  parse_init(&p, input, result.arena);
 
   AstStmt sentinel = { 0 };
   AstStmt *tail    = &sentinel;
 
-  while (p.pos < p.l.count)
+  while (p.curr_token.kind != TokenKind_EOF)
   {
-    AstStmt *stmt;
+    AstStmt *stmt = 0;
 
-    switch (p.l.tokens[p.pos].type)
+    switch (p.curr_token.kind)
     {
-      case TokenType_Let:
+      case TokenKind_Let:
       {
-        stmt      = arena_push_t(result.arena, AstStmt);
-        stmt->tag = AstStmt_Let;
+        Token let_token = p.curr_token;
+        if (!parse_expect_token(&p, TokenKind_Identifier)) break;
+        Token ident_token = p.curr_token;
+        if (!parse_expect_token(&p, TokenKind_Assign)) break;
 
-        AstExprIdentifier *identifier = arena_push_t(result.arena, AstExprIdentifier);
-        identifier->token             = p.l.tokens[p.pos + 1];
+        // TODO(tad): parse expressions
+        while (p.curr_token.kind != TokenKind_Semicolon)
+        {
+          parse_advance_token(&p);
+        }
 
-        stmt->data.let = (struct Let){
-          .token      = p.l.tokens[p.pos],
-          .identifier = identifier,
-          //.expression = // TODO(tad)
+        stmt                          = arena_push_t(p.arena, AstStmt);
+        AstExprIdentifier *identifier = arena_push_t(p.arena, AstExprIdentifier);
+        // AstExpr *expr                 = arena_push_t(p.arena, AstExpr);
+
+        identifier->token = ident_token;
+
+        *stmt = (AstStmt){
+          .tag = AstStmt_Let,
+          .data.let = {
+            .token = let_token,
+            .identifier = identifier,
+            // .expression = expr,
+          },
         };
 
         break;
       }
 
-      case TokenType_Illegal:
-      case TokenType_EOF:
-      case TokenType_Identifier:
-      case TokenType_Number:
-      case TokenType_Assign:
-      case TokenType_Plus:
-      case TokenType_Minus:
-      case TokenType_Bang:
-      case TokenType_Star:
-      case TokenType_Slash:
-      case TokenType_Less:
-      case TokenType_Greater:
-      case TokenType_Equal:
-      case TokenType_NotEqual:
-      case TokenType_Comma:
-      case TokenType_Semicolon:
-      case TokenType_LParen:
-      case TokenType_RParen:
-      case TokenType_LBrace:
-      case TokenType_RBrace:
-      case TokenType_LBracket:
-      case TokenType_RBracket:
-      case TokenType_Function:
-      case TokenType_True:
-      case TokenType_False:
-      case TokenType_If:
-      case TokenType_Else:
-      case TokenType_Return:
+      case TokenKind_Illegal:
+      case TokenKind_EOF:
+      case TokenKind_Identifier:
+      case TokenKind_Number:
+      case TokenKind_Assign:
+      case TokenKind_Plus:
+      case TokenKind_Minus:
+      case TokenKind_Bang:
+      case TokenKind_Star:
+      case TokenKind_Slash:
+      case TokenKind_Less:
+      case TokenKind_Greater:
+      case TokenKind_Equal:
+      case TokenKind_NotEqual:
+      case TokenKind_Comma:
+      case TokenKind_Semicolon:
+      case TokenKind_LParen:
+      case TokenKind_RParen:
+      case TokenKind_LBrace:
+      case TokenKind_RBrace:
+      case TokenKind_LBracket:
+      case TokenKind_RBracket:
+      case TokenKind_Function:
+      case TokenKind_True:
+      case TokenKind_False:
+      case TokenKind_If:
+      case TokenKind_Else:
+      case TokenKind_Return:
         // TODO(tad): not implemented
-        printf("Unsupported token encountered: %.*s", str8_fmt(token_name(p.l.tokens[p.pos - 1].type)));
+        printf("Unsupported token encountered: %.*s\n", str8_fmt(token_name(p.curr_token.kind)));
         break;
 
-      case TokenType_COUNT:
+      case TokenKind_COUNT:
       default:
         // TODO(tad): invalid case
-        printf("Invalid token encountered: %.*s", str8_fmt(token_name(p.l.tokens[p.pos - 1].type)));
+        printf("Invalid token encountered: %.*s\n", str8_fmt(token_name(p.curr_token.kind)));
         break;
     }
 
-    tail->next = stmt;
-    tail       = stmt;
+    if (stmt)
+    {
+      tail->next = stmt;
+      tail       = stmt;
+    }
+
+    parse_advance_token(&p);
   }
 
   result.statements = sentinel.next;
@@ -821,17 +747,18 @@ main(int argc, cstr *argv)
     input.buf = (u8 *)malloc(sizeof(*input.buf) * input.len);
     fread(input.buf, input.len, 1, f);
     fclose(f);
+
+    printf("tokenized '%s':\n\n", argv[1]);
   }
   else
   {
     input = test_get_input();
+    printf("test input:\n\n%.*s", str8_fmt(input));
+    printf("\n---------------\n\n");
+    printf("tokenized test input:\n\n");
   }
 
-  LexResult lex_result = lex(input);
-
-  printf("%.*s", str8_fmt(input));
-  printf("\n---------------\n\n");
-  lex_print(lex_result);
+  lex_print(input);
 
   return 0;
 }
@@ -839,16 +766,16 @@ main(int argc, cstr *argv)
 ////////////////////////////////////////////////////////////////////////////////
 // test
 
-#define test_assert_m(test, fmt, ...)  \
-  do                                   \
-  {                                    \
-    if (!(test))                       \
-    {                                  \
-      printf(fmt "\n", ##__VA_ARGS__); \
-      return 1;                        \
-    }                                  \
+#define test_assert_m(test, fmt, ...)                               \
+  do                                                                \
+  {                                                                 \
+    if (!(test))                                                    \
+    {                                                               \
+      printf("\033[0;31mfailure: " fmt "\033[0m\n", ##__VA_ARGS__); \
+      return 1;                                                     \
+    }                                                               \
   } while (0)
-#define test_assert(test) test_assert_m(test, "failure: test error");
+#define test_assert(test) test_assert_m(test, "test error");
 
 Str8 t_lex_input = str8_lit("let five = 5;\n"
                             "let ten = 10;\n"
@@ -870,83 +797,83 @@ Str8 t_lex_input = str8_lit("let five = 5;\n"
                             "\n"
                             "10 == 10\n"
                             "10 != 9\n"
-                            "\n");
+                            "");
 
-#define test_check_lex(type, literal) { str8_cti(literal), type }
+#define test_check_lex(kind, literal) { str8_cti(literal), kind }
 
 internal int
 test_lex(void)
 {
   Token test_results[] = {
-    test_check_lex(TokenType_Let, "let"),        test_check_lex(TokenType_Identifier, "five"),
-    test_check_lex(TokenType_Assign, "="),       test_check_lex(TokenType_Number, "5"),
-    test_check_lex(TokenType_Semicolon, ";"),    test_check_lex(TokenType_Let, "let"),
-    test_check_lex(TokenType_Identifier, "ten"), test_check_lex(TokenType_Assign, "="),
-    test_check_lex(TokenType_Number, "10"),      test_check_lex(TokenType_Semicolon, ";"),
+    test_check_lex(TokenKind_Let, "let"),        test_check_lex(TokenKind_Identifier, "five"),
+    test_check_lex(TokenKind_Assign, "="),       test_check_lex(TokenKind_Number, "5"),
+    test_check_lex(TokenKind_Semicolon, ";"),    test_check_lex(TokenKind_Let, "let"),
+    test_check_lex(TokenKind_Identifier, "ten"), test_check_lex(TokenKind_Assign, "="),
+    test_check_lex(TokenKind_Number, "10"),      test_check_lex(TokenKind_Semicolon, ";"),
 
-    test_check_lex(TokenType_Let, "let"),        test_check_lex(TokenType_Identifier, "add"),
-    test_check_lex(TokenType_Assign, "="),       test_check_lex(TokenType_Function, "fn"),
-    test_check_lex(TokenType_LParen, "("),       test_check_lex(TokenType_Identifier, "x"),
-    test_check_lex(TokenType_Comma, ","),        test_check_lex(TokenType_Identifier, "y"),
-    test_check_lex(TokenType_RParen, ")"),       test_check_lex(TokenType_LBrace, "{"),
-    test_check_lex(TokenType_Identifier, "x"),   test_check_lex(TokenType_Plus, "+"),
-    test_check_lex(TokenType_Identifier, "y"),   test_check_lex(TokenType_Semicolon, ";"),
-    test_check_lex(TokenType_RBrace, "}"),       test_check_lex(TokenType_Semicolon, ";"),
+    test_check_lex(TokenKind_Let, "let"),        test_check_lex(TokenKind_Identifier, "add"),
+    test_check_lex(TokenKind_Assign, "="),       test_check_lex(TokenKind_Function, "fn"),
+    test_check_lex(TokenKind_LParen, "("),       test_check_lex(TokenKind_Identifier, "x"),
+    test_check_lex(TokenKind_Comma, ","),        test_check_lex(TokenKind_Identifier, "y"),
+    test_check_lex(TokenKind_RParen, ")"),       test_check_lex(TokenKind_LBrace, "{"),
+    test_check_lex(TokenKind_Identifier, "x"),   test_check_lex(TokenKind_Plus, "+"),
+    test_check_lex(TokenKind_Identifier, "y"),   test_check_lex(TokenKind_Semicolon, ";"),
+    test_check_lex(TokenKind_RBrace, "}"),       test_check_lex(TokenKind_Semicolon, ";"),
 
-    test_check_lex(TokenType_Let, "let"),        test_check_lex(TokenType_Identifier, "result"),
-    test_check_lex(TokenType_Assign, "="),       test_check_lex(TokenType_Identifier, "add"),
-    test_check_lex(TokenType_LParen, "("),       test_check_lex(TokenType_Identifier, "five"),
-    test_check_lex(TokenType_Comma, ","),        test_check_lex(TokenType_Identifier, "ten"),
-    test_check_lex(TokenType_RParen, ")"),       test_check_lex(TokenType_Semicolon, ";"),
+    test_check_lex(TokenKind_Let, "let"),        test_check_lex(TokenKind_Identifier, "result"),
+    test_check_lex(TokenKind_Assign, "="),       test_check_lex(TokenKind_Identifier, "add"),
+    test_check_lex(TokenKind_LParen, "("),       test_check_lex(TokenKind_Identifier, "five"),
+    test_check_lex(TokenKind_Comma, ","),        test_check_lex(TokenKind_Identifier, "ten"),
+    test_check_lex(TokenKind_RParen, ")"),       test_check_lex(TokenKind_Semicolon, ";"),
 
-    test_check_lex(TokenType_Bang, "!"),         test_check_lex(TokenType_Minus, "-"),
-    test_check_lex(TokenType_Slash, "/"),        test_check_lex(TokenType_Star, "*"),
-    test_check_lex(TokenType_Number, "5"),       test_check_lex(TokenType_Semicolon, ";"),
-    test_check_lex(TokenType_Number, "5"),       test_check_lex(TokenType_Less, "<"),
-    test_check_lex(TokenType_Number, "10"),      test_check_lex(TokenType_Greater, ">"),
-    test_check_lex(TokenType_Number, "5"),       test_check_lex(TokenType_If, "if"),
-    test_check_lex(TokenType_LParen, "("),       test_check_lex(TokenType_Number, "5"),
-    test_check_lex(TokenType_Less, "<"),         test_check_lex(TokenType_Number, "10"),
-    test_check_lex(TokenType_RParen, ")"),       test_check_lex(TokenType_LBrace, "{"),
-    test_check_lex(TokenType_Return, "return"),  test_check_lex(TokenType_True, "true"),
-    test_check_lex(TokenType_Semicolon, ";"),    test_check_lex(TokenType_RBrace, "}"),
-    test_check_lex(TokenType_Else, "else"),      test_check_lex(TokenType_LBrace, "{"),
-    test_check_lex(TokenType_Return, "return"),  test_check_lex(TokenType_False, "false"),
-    test_check_lex(TokenType_Semicolon, ";"),    test_check_lex(TokenType_RBrace, "}"),
+    test_check_lex(TokenKind_Bang, "!"),         test_check_lex(TokenKind_Minus, "-"),
+    test_check_lex(TokenKind_Slash, "/"),        test_check_lex(TokenKind_Star, "*"),
+    test_check_lex(TokenKind_Number, "5"),       test_check_lex(TokenKind_Semicolon, ";"),
+    test_check_lex(TokenKind_Number, "5"),       test_check_lex(TokenKind_Less, "<"),
+    test_check_lex(TokenKind_Number, "10"),      test_check_lex(TokenKind_Greater, ">"),
+    test_check_lex(TokenKind_Number, "5"),       test_check_lex(TokenKind_If, "if"),
+    test_check_lex(TokenKind_LParen, "("),       test_check_lex(TokenKind_Number, "5"),
+    test_check_lex(TokenKind_Less, "<"),         test_check_lex(TokenKind_Number, "10"),
+    test_check_lex(TokenKind_RParen, ")"),       test_check_lex(TokenKind_LBrace, "{"),
+    test_check_lex(TokenKind_Return, "return"),  test_check_lex(TokenKind_True, "true"),
+    test_check_lex(TokenKind_Semicolon, ";"),    test_check_lex(TokenKind_RBrace, "}"),
+    test_check_lex(TokenKind_Else, "else"),      test_check_lex(TokenKind_LBrace, "{"),
+    test_check_lex(TokenKind_Return, "return"),  test_check_lex(TokenKind_False, "false"),
+    test_check_lex(TokenKind_Semicolon, ";"),    test_check_lex(TokenKind_RBrace, "}"),
 
-    test_check_lex(TokenType_Number, "10"),      test_check_lex(TokenType_Equal, "=="),
-    test_check_lex(TokenType_Number, "10"),      test_check_lex(TokenType_Number, "10"),
-    test_check_lex(TokenType_NotEqual, "!="),    test_check_lex(TokenType_Number, "9"),
+    test_check_lex(TokenKind_Number, "10"),      test_check_lex(TokenKind_Equal, "=="),
+    test_check_lex(TokenKind_Number, "10"),      test_check_lex(TokenKind_Number, "10"),
+    test_check_lex(TokenKind_NotEqual, "!="),    test_check_lex(TokenKind_Number, "9"),
   };
 
-  LexResult lex_result = lex(t_lex_input);
+  Lexer l     = { 0 };
+  Token token = { 0 };
 
-  //test_assert_m("failure: invalid lex", lexResult.is_valid);
+  lex_init(&l, t_lex_input);
+  usize tok_count = 0;
 
-  test_assert_m(arr_count(test_results) == lex_result.count,
-                "failure: wrong lex result count - expected=%lu, actual=%d",
-                arr_count(test_results),
-                lex_result.count);
-
-  for (u32 i = 0; i < lex_result.count; i++)
+  for (lex_advance_token(&l, &token); token.kind != TokenKind_EOF;
+       lex_advance_token(&l, &token), tok_count++)
   {
-    Token actual   = lex_result.tokens[i];
-    Token expected = test_results[i];
+    Token expected = test_results[tok_count];
 
-    test_assert_m(actual.type == expected.type,
-                  "failure: test[%d] - wrong token type - expected=%.*s, actual=%.*s",
-                  i,
-                  str8_fmt(token_name(expected.type)),
-                  str8_fmt(token_name(actual.type)));
+    test_assert_m(token.kind == expected.kind,
+                  "test[%zu] - wrong token kind - expected=%.*s, actual=%.*s",
+                  tok_count,
+                  str8_fmt(token_name(expected.kind)),
+                  str8_fmt(token_name(token.kind)));
 
-    test_assert_m(str8_equal(actual.value, expected.value),
-                  "failure: test[%d] - wrong token value - expected='%.*s', actual='%.*s'",
-                  i,
+    test_assert_m(str8_equal(token.value, expected.value),
+                  "test[%zu] - wrong token value - expected='%.*s', actual='%.*s'",
+                  tok_count,
                   str8_fmt(expected.value),
-                  str8_fmt(actual.value));
+                  str8_fmt(token.value));
   }
 
-  lex_free(lex_result);
+  test_assert_m(arr_count(test_results) == tok_count,
+                "wrong lex result count - expected=%lu, actual=%zu",
+                arr_count(test_results),
+                tok_count);
 
   return 0;
 }
@@ -956,26 +883,28 @@ test_parse_let(void)
 {
   Str8 input = str8_lit("let x = 5; let y = 10;");
 
-  Str8 expectedIdentifiers[] = {
+  Str8 expected_identifiers[] = {
     str8_cti("x"),
     str8_cti("y"),
   };
 
-  LexResult lex_result     = lex(input);
-  ParseResult parse_result = parse(lex_result);
+  ParseResult parse_result = parse(input);
 
   usize i = 0;
   for (AstStmt *stmt = parse_result.statements; stmt != 0; stmt = stmt->next)
   {
-    test_assert(stmt->tag == AstStmt_Let);
-    test_assert(str8_equal(stmt->data.let.identifier->token.value, expectedIdentifiers[i]));
+    test_assert_m(stmt->tag == AstStmt_Let, "expected let statement");
+    test_assert_m(str8_equal(stmt->data.let.identifier->token.value, expected_identifiers[i]),
+                  "unexpected let statement identifier");
 
     i += 1;
   }
 
-  test_assert(arr_count(expectedIdentifiers) == i);
+  test_assert_m(arr_count(expected_identifiers) == i,
+                "expected %zu statements, parsed %zu",
+                arr_count(expected_identifiers),
+                i);
 
-  lex_free(lex_result);
   parse_free(parse_result);
 
   return 0;
@@ -1006,7 +935,7 @@ repl(void)
 {
   const cstr PROMPT = ">> ";
   char buffer[KiB(4)];
-  b32 print_prompt = 1;
+  b32 print_prompt = true;
 
   for (;;)
   {
@@ -1026,15 +955,9 @@ repl(void)
       }
     }
 
-    Str8 input           = str8_from_cstr(buffer);
-    LexResult lex_result = lex(input);
-
-    lex_print(lex_result);
+    Str8 input = str8_from_cstr(buffer);
+    lex_print(input);
 
     print_prompt = input.buf[input.len - 1] == '\n';
-
-    if (lex_result.count == 0 && !print_prompt && !all_whitespace(input)) printf("\n");
-
-    lex_free(lex_result);
   }
 }
