@@ -29,7 +29,6 @@
 
 #define DEFER_LOOP(begin, end) for (int _i_ = ((begin), 0); !_i_; _i_ += 1, (end))
 
-typedef char *cstr;
 typedef uint8_t u8;
 typedef uint16_t u16;
 typedef uint32_t u32;
@@ -60,9 +59,9 @@ typedef b8 bool;
 #endif
 
 internal usize
-cstr_length(cstr c)
+cstr_length(char const *c)
 {
-  cstr p = c;
+  char const *p = c;
   for (; *p != 0; p++);
   return (p - c);
 }
@@ -70,7 +69,7 @@ cstr_length(cstr c)
 typedef struct Str8 Str8;
 struct Str8
 {
-  u8 *buf;
+  u8 const *buf;
   usize len;
 };
 
@@ -79,13 +78,13 @@ struct Str8
 #define str8_fmt(S) (u32)(S).len, (S).buf
 
 internal Str8
-str8(u8 *value, usize length)
+str8(u8 const *value, usize length)
 {
   return (Str8){ value, length };
 }
 
 internal Str8
-str8_from_cstr(cstr c)
+str8_from_cstr(char const *c)
 {
   return str8((u8 *)c, cstr_length(c));
 }
@@ -319,7 +318,9 @@ struct Token
   TokenKind kind;
 };
 
-Token keywords[] = {
+internal const Token invalid_token = { .kind = TokenKind_Illegal };
+
+internal Token keyword_tokens[] = {
   {     str8_cti("fn"), TokenKind_Function },
   {    str8_cti("let"),      TokenKind_Let },
   {   str8_cti("true"),     TokenKind_True },
@@ -353,7 +354,7 @@ lex_consume_whitespace(Lexer *l)
 }
 
 internal u8
-lex_peek_char(Lexer *l)
+lex_peek_char(Lexer const *l)
 {
   usize next_pos = l->pos + 1;
   if (next_pos >= l->input.len)
@@ -443,15 +444,15 @@ lex_advance_token(Lexer *l, Token *token)
         } while (pos < l->input.len && (ch == '_' || is_letter(ch) || is_digit(ch)));
 
         TokenKind kind = TokenKind_Identifier;
-        for (usize i = 0; i < arr_count(keywords); i++)
+        for (usize i = 0; i < arr_count(keyword_tokens); i++)
         {
-          Str8 keyword = keywords[i].value;
+          Str8 keyword = keyword_tokens[i].value;
 
           if (keyword.len > length) continue;
 
           if (!memcmp(keyword.buf, &l->input.buf[l->pos], keyword.len))
           {
-            kind = keywords[i].kind;
+            kind = keyword_tokens[i].kind;
           }
         }
 
@@ -498,15 +499,18 @@ typedef enum
 typedef struct Message Message;
 struct Message
 {
-  Message *next;
   MessageLevel level;
   Str8 value;
+
+  Message *next;
 };
 
 typedef struct MessageList MessageList;
 struct MessageList
 {
-  Message *messages;
+  Message *first;
+  Message *last;
+  usize count;
   MessageLevel level;
 };
 
@@ -566,14 +570,8 @@ struct Parser
   Token curr_token;
   Token peek_token;
 
-  Arena *arena;
-};
-
-typedef struct ParseResult ParseResult;
-struct ParseResult
-{
   AstStmt *statements;
-  MessageList messages;
+  MessageList message_list;
 
   Arena *arena;
 };
@@ -589,6 +587,25 @@ parse_init(Parser *p, Str8 input, Arena *arena)
 }
 
 internal void
+parse_error(Parser *p, Str8 value, MessageLevel level)
+{
+  Message *m = arena_push_t(p->arena, Message);
+  m->level   = level;
+  m->value   = value;
+
+  if (!p->message_list.first)
+  {
+    p->message_list.first = m;
+  }
+  else
+  {
+    p->message_list.last->next = m;
+  }
+
+  p->message_list.last = m;
+}
+
+internal void
 parse_advance_token(Parser *p)
 {
   p->curr_token = p->peek_token;
@@ -596,33 +613,38 @@ parse_advance_token(Parser *p)
 }
 
 internal b32
-parse_expect_token(Parser *p, TokenKind kind)
+parse_expect(Parser *p, TokenKind kind)
 {
   if (p->peek_token.kind == kind)
   {
     parse_advance_token(p);
     return true;
   }
-  return false;
+  else
+  {
+    // TODO(tad): format error string support
+    parse_error(p, str8_lit(""), MessageLevel_Error);
+    return false;
+  }
 }
 
 internal void
-parse_free(ParseResult p)
+parse_free(Parser *p)
 {
-  arena_free(p.arena);
+  arena_free(p->arena);
 }
 
-internal ParseResult
+internal Parser
 parse(Str8 input)
 {
-  ParseResult result = { 0 };
-  result.arena       = arena_alloc(KiB(4));
-
   Parser p = { 0 };
-  parse_init(&p, input, result.arena);
+  parse_init(&p, input, arena_alloc(KiB(4)));
 
   AstStmt sentinel = { 0 };
   AstStmt *tail    = &sentinel;
+
+  // TODO(tad): consider no branching expectation checks with result type,
+  // only breaking before allocating and initializing the statement.
 
   while (p.curr_token.kind != TokenKind_EOF)
   {
@@ -632,10 +654,10 @@ parse(Str8 input)
     {
       case TokenKind_Let:
       {
-        Token let_token = p.curr_token;
-        if (!parse_expect_token(&p, TokenKind_Identifier)) break;
-        Token ident_token = p.curr_token;
-        if (!parse_expect_token(&p, TokenKind_Assign)) break;
+        Token let_token   = p.curr_token;
+        Token ident_token = p.peek_token;
+        if (!parse_expect(&p, TokenKind_Identifier)) break;
+        if (!parse_expect(&p, TokenKind_Assign)) break;
 
         // TODO(tad): parse expressions
         while (p.curr_token.kind != TokenKind_Semicolon)
@@ -709,9 +731,9 @@ parse(Str8 input)
     parse_advance_token(&p);
   }
 
-  result.statements = sentinel.next;
+  p.statements = sentinel.next;
 
-  return result;
+  return p;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -722,7 +744,7 @@ internal int test(void);
 internal int repl(void);
 
 int
-main(int argc, cstr *argv)
+main(int argc, char *argv[])
 {
   Str8 input = { 0 };
   if (argc > 1)
@@ -744,8 +766,9 @@ main(int argc, cstr *argv)
       fseek(f, 0, SEEK_SET);
       input.len = size;
     }
-    input.buf = (u8 *)malloc(sizeof(*input.buf) * input.len);
-    fread(input.buf, input.len, 1, f);
+    u8 *buf = (u8 *)malloc(sizeof(*input.buf) * input.len);
+    fread(buf, input.len, 1, f);
+    input.buf = buf;
     fclose(f);
 
     printf("tokenized '%s':\n\n", argv[1]);
@@ -888,10 +911,10 @@ test_parse_let(void)
     str8_cti("y"),
   };
 
-  ParseResult parse_result = parse(input);
+  Parser p = parse(input);
 
   usize i = 0;
-  for (AstStmt *stmt = parse_result.statements; stmt != 0; stmt = stmt->next)
+  for (AstStmt *stmt = p.statements; stmt != 0; stmt = stmt->next)
   {
     test_assert_m(stmt->tag == AstStmt_Let, "expected let statement");
     test_assert_m(str8_equal(stmt->data.let.identifier->token.value, expected_identifiers[i]),
@@ -905,7 +928,7 @@ test_parse_let(void)
                 arr_count(expected_identifiers),
                 i);
 
-  parse_free(parse_result);
+  parse_free(&p);
 
   return 0;
 }
@@ -933,7 +956,7 @@ test(void)
 internal int
 repl(void)
 {
-  const cstr PROMPT = ">> ";
+  char const *PROMPT = ">> ";
   char buffer[KiB(4)];
   b32 print_prompt = true;
 
