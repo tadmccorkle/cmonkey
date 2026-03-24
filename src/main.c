@@ -1,4 +1,7 @@
+#include <assert.h>
 #include <ctype.h>
+#include <math.h>
+#include <stdarg.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -75,7 +78,7 @@ struct Str8
 
 #define str8_lit(S) (Str8){ (u8 *)(S), sizeof(S) - 1 }
 #define str8_cti(S) { (u8 *)(S), sizeof(S) - 1 }
-#define str8_fmt(S) (u32)(S).len, (S).buf
+#define str8_va(S)  (int)(S).len, (S).buf
 
 internal Str8
 str8(u8 const *value, usize length)
@@ -478,7 +481,7 @@ lex_print(Str8 input)
   do
   {
     lex_advance_token(&l, &token);
-    printf("%2d %-30.*s %.*s\n", token.kind, str8_fmt(token_name(token.kind)), str8_fmt(token.value));
+    printf("%2d %-30.*s %.*s\n", token.kind, str8_va(token_name(token.kind)), str8_va(token.value));
   } while (token.kind != TokenKind_EOF);
 }
 
@@ -516,35 +519,64 @@ struct MessageList
 
 typedef enum
 {
-  AstStmt_Let,
-  // ...
-  AstStmt_COUNT,
-} AstStmtKind;
-
-typedef enum
-{
   AstExpr_Identifier,
+  AstExpr_Number,
+  AstExpr_Prefix,
+  AstExpr_Infix,
   // ...
   AstExpr_COUNT,
 } AstExprKind;
+
+typedef struct AstExpr AstExpr;
 
 typedef struct AstExprIdentifier AstExprIdentifier;
 struct AstExprIdentifier
 {
   Token token;
-  // TODO(tad): include Str8 Value property?
 };
 
-typedef struct AstExpr AstExpr;
+typedef struct AstExprNumber AstExprNumber;
+struct AstExprNumber
+{
+  Token token;
+  s64 value;
+};
+
+typedef struct AstExprPrefix AstExprPrefix;
+struct AstExprPrefix
+{
+  Token token;
+  AstExpr *rhs;
+};
+
+typedef struct AstExprInfix AstExprInfix;
+struct AstExprInfix
+{
+  Token token;
+  AstExpr *lhs;
+  AstExpr *rhs;
+};
+
 struct AstExpr
 {
   AstExprKind tag;
   union
   {
     AstExprIdentifier identifier;
+    AstExprNumber number;
+    AstExprPrefix prefix;
+    AstExprInfix infix;
     // ...
   } data;
 };
+
+typedef enum
+{
+  AstStmt_Let,
+  AstStmt_Ret,
+  AstStmt_Expr,
+  AstStmt_COUNT,
+} AstStmtKind;
 
 typedef struct AstStmt AstStmt;
 struct AstStmt
@@ -557,9 +589,18 @@ struct AstStmt
     {
       Token token;
       AstExprIdentifier *identifier;
-      AstExpr *expression;
+      AstExpr *expr;
     } let;
-    // ...
+    struct Return
+    {
+      Token token;
+      AstExpr *expr;
+    } ret;
+    struct Expr
+    {
+      Token token;
+      AstExpr *expr;
+    } expr;
   } data;
 };
 
@@ -576,6 +617,18 @@ struct Parser
   Arena *arena;
 };
 
+typedef enum
+{
+  Precedence_Lowest,
+  Precedence_Equals,      // ==
+  Precedence_LessGreater, // >,<
+  Precedence_Sum,         // +
+  Precedence_Product,     // *
+  Precedence_Prefix,      // -,!
+  Precedence_Call,        // func()
+  Precedence_COUNT
+} Precedence;
+
 internal void
 parse_init(Parser *p, Str8 input, Arena *arena)
 {
@@ -587,11 +640,40 @@ parse_init(Parser *p, Str8 input, Arena *arena)
 }
 
 internal void
-parse_error(Parser *p, Str8 value, MessageLevel level)
+parse_print_messages(Parser *p)
+{
+  for (Message *m = p->message_list.first; m != 0; m = m->next)
+  {
+    printf("%.*s\n", str8_va(m->value));
+  }
+}
+
+internal void
+parse_error(Parser *p, MessageLevel level, char const *fmt, ...)
 {
   Message *m = arena_push_t(p->arena, Message);
-  m->level   = level;
-  m->value   = value;
+
+  // TODO(tad): dedicated str8_f and str8_fv functions
+  va_list args1;
+  va_list args2;
+  va_start(args1, fmt);
+  va_copy(args2, args1);
+  u32 len = vsnprintf(0, 0, fmt, args1);
+  // TODO(tad): arena_push_t w/ count
+  // TODO(tad): arena_push and etc. w/o zero mem
+  char *buf = arena_push(p->arena, len + 1, _Alignof(u8));
+  len       = vsnprintf(buf, len + 1, fmt, args2);
+  buf[len]  = 0;
+  va_end(args2);
+  va_end(args1);
+
+  m->level = level;
+  m->value = str8((u8 *)buf, len);
+
+  if (p->message_list.level < level)
+  {
+    p->message_list.level = level;
+  }
 
   if (!p->message_list.first)
   {
@@ -622,8 +704,11 @@ parse_expect(Parser *p, TokenKind kind)
   }
   else
   {
-    // TODO(tad): format error string support
-    parse_error(p, str8_lit(""), MessageLevel_Error);
+    parse_error(p,
+                MessageLevel_Error,
+                "Expected token '%.*s' but parsed '%.*s'.",
+                str8_va(token_name(kind)),
+                str8_va(token_name(p->peek_token.kind)));
     return false;
   }
 }
@@ -632,6 +717,122 @@ internal void
 parse_free(Parser *p)
 {
   arena_free(p->arena);
+}
+
+// TODO(tad): consider printing complete AST and individual nodes for debugging/testing
+
+internal Precedence
+parse_get_precedence(TokenKind kind)
+{
+  switch (kind)
+  {
+    case TokenKind_Equal:
+    case TokenKind_NotEqual: return Precedence_Equals;
+
+    case TokenKind_Less:
+    case TokenKind_Greater: return Precedence_LessGreater;
+
+    case TokenKind_Plus:
+    case TokenKind_Minus: return Precedence_Sum;
+
+    case TokenKind_Slash:
+    case TokenKind_Star: return Precedence_Product;
+
+    default: return Precedence_Lowest;
+  }
+}
+
+internal AstExpr *
+parse_expr(Parser *p, Precedence precedence)
+{
+  AstExpr *lhs = 0;
+
+  // prefix
+  {
+    switch (p->curr_token.kind)
+    {
+      case TokenKind_Identifier:
+      {
+        lhs                        = arena_push_t(p->arena, AstExpr);
+        lhs->tag                   = AstExpr_Identifier;
+        lhs->data.identifier.token = p->curr_token;
+        break;
+      }
+
+      case TokenKind_Number:
+      {
+        lhs                    = arena_push_t(p->arena, AstExpr);
+        lhs->tag               = AstExpr_Number;
+        lhs->data.number.token = p->curr_token;
+        lhs->data.number.value = strtoll((char *)p->curr_token.value.buf, 0, 10);
+        break;
+      }
+
+      case TokenKind_Minus:
+      case TokenKind_Bang:
+      {
+        lhs                    = arena_push_t(p->arena, AstExpr);
+        lhs->tag               = AstExpr_Prefix;
+        lhs->data.prefix.token = p->curr_token;
+        parse_advance_token(p);
+        lhs->data.prefix.rhs = parse_expr(p, Precedence_Prefix);
+        break;
+      }
+
+      case TokenKind_LParen:
+      case TokenKind_RParen:
+      case TokenKind_LBrace:
+      case TokenKind_RBrace:
+      case TokenKind_LBracket:
+      case TokenKind_RBracket:
+      case TokenKind_Function:
+      case TokenKind_True:
+      case TokenKind_False:
+      case TokenKind_If:
+      case TokenKind_Else:
+      default:
+        parse_error(p,
+                    MessageLevel_Error,
+                    "'%.*s' (type '%.*s') is not a valid prefix token.",
+                    str8_va(p->curr_token.value),
+                    str8_va(token_name(p->curr_token.kind)));
+        return lhs;
+    }
+  }
+
+  // infix
+  while (p->curr_token.kind != TokenKind_Semicolon &&
+         precedence < parse_get_precedence(p->peek_token.kind))
+  {
+    switch (p->peek_token.kind)
+    {
+      case TokenKind_Plus:
+      case TokenKind_Minus:
+      case TokenKind_Slash:
+      case TokenKind_Star:
+      case TokenKind_Equal:
+      case TokenKind_NotEqual:
+      case TokenKind_Less:
+      case TokenKind_Greater:
+      {
+        parse_advance_token(p);
+
+        AstExpr *infix          = arena_push_t(p->arena, AstExpr);
+        infix->tag              = AstExpr_Infix;
+        infix->data.infix.token = p->curr_token;
+        infix->data.infix.lhs   = lhs;
+
+        Precedence infix_precedence = parse_get_precedence(p->curr_token.kind);
+        parse_advance_token(p);
+        infix->data.infix.rhs = parse_expr(p, infix_precedence);
+        break;
+      }
+
+      default: return lhs;
+    }
+  }
+
+  return lhs;
 }
 
 internal Parser
@@ -683,8 +884,30 @@ parse(Str8 input)
         break;
       }
 
-      case TokenKind_Illegal:
-      case TokenKind_EOF:
+      case TokenKind_Return:
+      {
+        Token ret_token = p.curr_token;
+
+        // TODO(tad): parse expressions
+        while (p.curr_token.kind != TokenKind_Semicolon)
+        {
+          parse_advance_token(&p);
+        }
+
+        stmt = arena_push_t(p.arena, AstStmt);
+        // AstExpr *expr                 = arena_push_t(p.arena, AstExpr);
+
+        *stmt = (AstStmt){
+          .tag = AstStmt_Ret,
+          .data.let = {
+            .token = ret_token,
+            // .expression = expr,
+          },
+        };
+        break;
+      }
+
+      // TODO(tad): some kinds are not appropriate here (e.g., semicolon)
       case TokenKind_Identifier:
       case TokenKind_Number:
       case TokenKind_Assign:
@@ -710,16 +933,34 @@ parse(Str8 input)
       case TokenKind_False:
       case TokenKind_If:
       case TokenKind_Else:
-      case TokenKind_Return:
-        // TODO(tad): not implemented
-        printf("Unsupported token encountered: %.*s\n", str8_fmt(token_name(p.curr_token.kind)));
-        break;
+      {
+        stmt                  = arena_push_t(p.arena, AstStmt);
+        stmt->tag             = AstStmt_Expr;
+        stmt->data.expr.token = p.curr_token;
+        stmt->data.expr.expr  = parse_expr(&p, Precedence_Lowest);
 
-      case TokenKind_COUNT:
-      default:
-        // TODO(tad): invalid case
-        printf("Invalid token encountered: %.*s\n", str8_fmt(token_name(p.curr_token.kind)));
+        if (p.peek_token.kind == TokenKind_Semicolon)
+        {
+          parse_advance_token(&p);
+        }
+
         break;
+      }
+
+      case TokenKind_Illegal:
+      {
+        for (usize i = 0; i < p.curr_token.value.len; i++)
+        {
+          u8 c = p.curr_token.value.buf[i];
+          char *fmt = c >= 32 && c <= 126 ? "Illegal token: %c" : "Illegal unprintable token: \\x%X";
+          parse_error(&p, MessageLevel_Error, fmt, c);
+        }
+        break;
+      }
+
+      case TokenKind_EOF: assert(!"EOF tokens are checked by outer loop condition."); break;
+      case TokenKind_COUNT:
+      default: assert(!"Tokenizer produced invalid token."); break;
     }
 
     if (stmt)
@@ -739,7 +980,6 @@ parse(Str8 input)
 ////////////////////////////////////////////////////////////////////////////////
 // main
 
-internal Str8 test_get_input(void);
 internal int test(void);
 internal int repl(void);
 
@@ -775,8 +1015,30 @@ main(int argc, char *argv[])
   }
   else
   {
-    input = test_get_input();
-    printf("test input:\n\n%.*s", str8_fmt(input));
+    input = str8_lit("let five = 5;\n"
+                     "let ten = 10;\n"
+                     "\n"
+                     "let add = fn(x, y) {\n"
+                     "  x + y;\n"
+                     "};\n"
+                     "\n"
+                     "let result = add(five, ten);"
+                     "\n"
+                     "!-/*5;\n"
+                     "5 < 10 > 5\n"
+                     "\n"
+                     "if (5 < 10) {\n"
+                     "  return true;\n"
+                     "} else {\n"
+                     "  return false;\n"
+                     "}\n"
+                     "\n"
+                     "10 == 10\n"
+                     "10 != 9\n"
+                     "@\n"
+                     "");
+
+    printf("test input:\n\n%.*s", str8_va(input));
     printf("\n---------------\n\n");
     printf("tokenized test input:\n\n");
   }
@@ -800,33 +1062,33 @@ main(int argc, char *argv[])
   } while (0)
 #define test_assert(test) test_assert_m(test, "test error");
 
-Str8 t_lex_input = str8_lit("let five = 5;\n"
-                            "let ten = 10;\n"
-                            "\n"
-                            "let add = fn(x, y) {\n"
-                            "  x + y;\n"
-                            "};\n"
-                            "\n"
-                            "let result = add(five, ten);"
-                            "\n"
-                            "!-/*5;\n"
-                            "5 < 10 > 5\n"
-                            "\n"
-                            "if (5 < 10) {\n"
-                            "  return true;\n"
-                            "} else {\n"
-                            "  return false;\n"
-                            "}\n"
-                            "\n"
-                            "10 == 10\n"
-                            "10 != 9\n"
-                            "");
-
-#define test_check_lex(kind, literal) { str8_cti(literal), kind }
-
 internal int
 test_lex(void)
 {
+  Str8 input = str8_lit("let five = 5;\n"
+                        "let ten = 10;\n"
+                        "\n"
+                        "let add = fn(x, y) {\n"
+                        "  x + y;\n"
+                        "};\n"
+                        "\n"
+                        "let result = add(five, ten);"
+                        "\n"
+                        "!-/*5;\n"
+                        "5 < 10 > 5\n"
+                        "\n"
+                        "if (5 < 10) {\n"
+                        "  return true;\n"
+                        "} else {\n"
+                        "  return false;\n"
+                        "}\n"
+                        "\n"
+                        "10 == 10\n"
+                        "10 != 9\n"
+                        "@\n"
+                        "");
+
+#define test_check_lex(kind, literal) { str8_cti(literal), kind }
   Token test_results[] = {
     test_check_lex(TokenKind_Let, "let"),        test_check_lex(TokenKind_Identifier, "five"),
     test_check_lex(TokenKind_Assign, "="),       test_check_lex(TokenKind_Number, "5"),
@@ -867,12 +1129,14 @@ test_lex(void)
     test_check_lex(TokenKind_Number, "10"),      test_check_lex(TokenKind_Equal, "=="),
     test_check_lex(TokenKind_Number, "10"),      test_check_lex(TokenKind_Number, "10"),
     test_check_lex(TokenKind_NotEqual, "!="),    test_check_lex(TokenKind_Number, "9"),
+    test_check_lex(TokenKind_Illegal, "@"),
   };
+#undef test_check_lex
 
   Lexer l     = { 0 };
   Token token = { 0 };
 
-  lex_init(&l, t_lex_input);
+  lex_init(&l, input);
   usize tok_count = 0;
 
   for (lex_advance_token(&l, &token); token.kind != TokenKind_EOF;
@@ -883,14 +1147,14 @@ test_lex(void)
     test_assert_m(token.kind == expected.kind,
                   "test[%zu] - wrong token kind - expected=%.*s, actual=%.*s",
                   tok_count,
-                  str8_fmt(token_name(expected.kind)),
-                  str8_fmt(token_name(token.kind)));
+                  str8_va(token_name(expected.kind)),
+                  str8_va(token_name(token.kind)));
 
     test_assert_m(str8_equal(token.value, expected.value),
                   "test[%zu] - wrong token value - expected='%.*s', actual='%.*s'",
                   tok_count,
-                  str8_fmt(expected.value),
-                  str8_fmt(token.value));
+                  str8_va(expected.value),
+                  str8_va(token.value));
   }
 
   test_assert_m(arr_count(test_results) == tok_count,
@@ -902,7 +1166,7 @@ test_lex(void)
 }
 
 internal int
-test_parse_let(void)
+test_parse_stmt_let(void)
 {
   Str8 input = str8_lit("let x = 5; let y = 10;");
 
@@ -912,15 +1176,16 @@ test_parse_let(void)
   };
 
   Parser p = parse(input);
+  parse_print_messages(&p);
+
+  test_assert_m(p.message_list.level <= MessageLevel_Info, "unexpected parse errors");
 
   usize i = 0;
-  for (AstStmt *stmt = p.statements; stmt != 0; stmt = stmt->next)
+  for (AstStmt *stmt = p.statements; stmt != 0; stmt = stmt->next, i++)
   {
     test_assert_m(stmt->tag == AstStmt_Let, "expected let statement");
     test_assert_m(str8_equal(stmt->data.let.identifier->token.value, expected_identifiers[i]),
                   "unexpected let statement identifier");
-
-    i += 1;
   }
 
   test_assert_m(arr_count(expected_identifiers) == i,
@@ -933,10 +1198,128 @@ test_parse_let(void)
   return 0;
 }
 
-internal Str8
-test_get_input(void)
+internal int
+test_parse_stmt_ret(void)
 {
-  return t_lex_input;
+  Str8 input                = str8_lit("return 5; return 10;");
+  const u32 statement_count = 2;
+
+  Parser p = parse(input);
+  parse_print_messages(&p);
+
+  test_assert_m(p.message_list.level <= MessageLevel_Info, "unexpected parse errors");
+
+  usize i = 0;
+  for (AstStmt *stmt = p.statements; stmt != 0; stmt = stmt->next, i++)
+  {
+    test_assert_m(stmt->tag == AstStmt_Ret, "expected return statement");
+  }
+
+  test_assert_m(statement_count == i, "expected %u statements, parsed %zu", statement_count, i);
+
+  parse_free(&p);
+
+  return 0;
+}
+
+internal int
+test_parse_stmt_expr(void)
+{
+  Str8 input = str8_lit("test_identifier;");
+
+  Str8 expected_identifiers[] = {
+    str8_cti("test_identifier"),
+  };
+
+  Parser p = parse(input);
+  parse_print_messages(&p);
+
+  test_assert_m(p.message_list.level <= MessageLevel_Info, "unexpected parse errors");
+
+  usize i = 0;
+  for (AstStmt *stmt = p.statements; stmt != 0; stmt = stmt->next, i++)
+  {
+    test_assert_m(stmt->tag == AstStmt_Expr, "expected expression statement");
+    test_assert_m(stmt->data.expr.token.kind == TokenKind_Identifier, "expected identifier expression");
+    test_assert_m(str8_equal(stmt->data.expr.token.value, expected_identifiers[i]),
+                  "expected identifier expression '%.*s', parsed '%.*s'",
+                  str8_va(expected_identifiers[i]),
+                  str8_va(stmt->data.expr.token.value));
+  }
+
+  test_assert_m(arr_count(expected_identifiers) == i,
+                "expected %zu statements, parsed %zu",
+                arr_count(expected_identifiers),
+                i);
+
+  return 0;
+}
+
+internal int
+test_parse_expr_identifier(void)
+{
+  Str8 input = str8_lit("test_identifier; other_test_identifier");
+
+  Str8 expected_identifiers[] = {
+    str8_cti("test_identifier"),
+    str8_cti("other_test_identifier"),
+  };
+
+  Parser p = parse(input);
+  parse_print_messages(&p);
+
+  test_assert_m(p.message_list.level <= MessageLevel_Info, "unexpected parse errors");
+
+  usize i = 0;
+  for (AstStmt *stmt = p.statements; stmt != 0; stmt = stmt->next, i++)
+  {
+    test_assert_m(stmt->data.expr.expr->tag == AstExpr_Identifier, "expected identifier expression");
+    test_assert_m(
+    str8_equal(stmt->data.expr.expr->data.identifier.token.value, expected_identifiers[i]),
+    "expected identifier expression '%.*s', parsed '%.*s'",
+    str8_va(expected_identifiers[i]),
+    str8_va(stmt->data.expr.token.value));
+  }
+
+  test_assert_m(arr_count(expected_identifiers) == i,
+                "expected %zu statements, parsed %zu",
+                arr_count(expected_identifiers),
+                i);
+
+  return 0;
+}
+
+internal int
+test_parse_expr_number(void)
+{
+  Str8 input = str8_lit("42069;");
+
+  Str8 expected_numbers[] = {
+    str8_cti("42069"),
+  };
+
+  Parser p = parse(input);
+  parse_print_messages(&p);
+
+  test_assert_m(p.message_list.level <= MessageLevel_Info, "unexpected parse errors");
+
+  usize i = 0;
+  for (AstStmt *stmt = p.statements; stmt != 0; stmt = stmt->next, i++)
+  {
+    test_assert_m(stmt->data.expr.expr->tag == AstExpr_Number, "expected number expression");
+    test_assert_m(str8_equal(stmt->data.expr.expr->data.number.token.value, expected_numbers[i]),
+                  "expected identifier expression '%.*s', parsed '%.*s'",
+                  str8_va(expected_numbers[i]),
+                  str8_va(stmt->data.expr.token.value));
+    test_assert(stmt->data.expr.expr->data.number.value == 42069);
+  }
+
+  test_assert_m(arr_count(expected_numbers) == i,
+                "expected %zu statements, parsed %zu",
+                arr_count(expected_numbers),
+                i);
+
+  return 0;
 }
 
 internal int
@@ -945,7 +1328,12 @@ test(void)
   int result = 0;
 
   result += test_lex();
-  result += test_parse_let();
+  result += test_parse_stmt_let();
+  result += test_parse_stmt_ret();
+  result += test_parse_stmt_expr();
+
+  result += test_parse_expr_identifier();
+  result += test_parse_expr_number();
 
   return result;
 }
