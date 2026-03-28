@@ -98,6 +98,60 @@ str8_equal(Str8 a, Str8 b)
   return a.len == b.len && memcmp(a.buf, b.buf, a.len) == 0;
 }
 
+typedef struct StrBuilder8 StrBuilder8;
+struct StrBuilder8
+{
+  u8 *buf;
+  usize len;
+  usize cap;
+};
+
+internal StrBuilder8
+str8_init(usize capacity)
+{
+  StrBuilder8 builder = { .cap = capacity };
+  builder.buf         = malloc(sizeof(*builder.buf) * builder.cap);
+  return builder;
+}
+
+internal void
+str8_ensure_capacity(StrBuilder8 *builder, usize required)
+{
+  if (builder->cap < required)
+  {
+    usize new_size = max(2 * sizeof(*builder->buf) * builder->cap, required);
+    builder->buf   = realloc(builder->buf, required);
+    builder->cap   = new_size;
+  }
+}
+
+internal void
+str8_append(StrBuilder8 *builder, Str8 value)
+{
+  usize required_size = builder->len + value.len;
+  str8_ensure_capacity(builder, required_size);
+  memcpy(builder->buf + builder->len, value.buf, value.len);
+  builder->len += value.len;
+}
+
+#define str8_append_lit(builder, value) str8_append((builder), str8_lit((value)))
+
+internal void
+str8_append_char(StrBuilder8 *builder, u8 value)
+{
+  str8_ensure_capacity(builder, builder->len + 1);
+  builder->buf[builder->len - 1] = value;
+  builder->len += 1;
+}
+
+// NOTE(tad): Return value allocated with `malloc` and must be freed.
+internal Str8
+str8_build(StrBuilder8 *builder)
+{
+  str8_append_char(builder, 0);
+  return str8(builder->buf, builder->len);
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // arena
 
@@ -519,6 +573,18 @@ struct MessageList
 
 typedef enum
 {
+  Precedence_Lowest,
+  Precedence_Equals,      // ==
+  Precedence_LessGreater, // >,<
+  Precedence_Sum,         // +
+  Precedence_Product,     // *
+  Precedence_Prefix,      // -,!
+  Precedence_Call,        // func()
+  Precedence_COUNT
+} Precedence;
+
+typedef enum
+{
   AstExpr_Identifier,
   AstExpr_Number,
   AstExpr_Prefix,
@@ -581,8 +647,9 @@ typedef enum
 typedef struct AstStmt AstStmt;
 struct AstStmt
 {
-  AstStmtKind tag;
   AstStmt *next;
+
+  AstStmtKind tag;
   union
   {
     struct Let
@@ -617,18 +684,6 @@ struct Parser
   Arena *arena;
 };
 
-typedef enum
-{
-  Precedence_Lowest,
-  Precedence_Equals,      // ==
-  Precedence_LessGreater, // >,<
-  Precedence_Sum,         // +
-  Precedence_Product,     // *
-  Precedence_Prefix,      // -,!
-  Precedence_Call,        // func()
-  Precedence_COUNT
-} Precedence;
-
 internal void
 parse_init(Parser *p, Str8 input, Arena *arena)
 {
@@ -637,6 +692,77 @@ parse_init(Parser *p, Str8 input, Arena *arena)
   lex_init(&p->l, input);
   lex_advance_token(&p->l, &p->curr_token);
   lex_advance_token(&p->l, &p->peek_token);
+}
+
+internal void
+parse_free(Parser *p)
+{
+  arena_free(p->arena);
+}
+
+internal void
+parse_build_expr_string(StrBuilder8 *b, AstExpr *expr)
+{
+  if (expr == 0) return;
+
+  switch (expr->tag)
+  {
+    case AstExpr_Identifier: str8_append(b, expr->data.identifier.token.value); break;
+    case AstExpr_Number: str8_append(b, expr->data.number.token.value); break;
+    case AstExpr_Prefix:
+      str8_append_lit(b, "(");
+      str8_append(b, expr->data.prefix.token.value);
+      parse_build_expr_string(b, expr->data.prefix.rhs);
+      str8_append_lit(b, ")");
+      break;
+    case AstExpr_Infix:
+      str8_append_lit(b, "(");
+      parse_build_expr_string(b, expr->data.infix.lhs);
+      str8_append_lit(b, " ");
+      str8_append(b, expr->data.infix.token.value);
+      str8_append_lit(b, " ");
+      parse_build_expr_string(b, expr->data.infix.rhs);
+      str8_append_lit(b, ")");
+      break;
+    case AstExpr_COUNT:
+    default: str8_append_lit(b, "[INVALID EXPRESSION TAG]"); break;
+  }
+}
+
+// NOTE(tad): This is entirely for debugging purposes and should not otherwise be used.
+// Uses `malloc`, so the return value must be freed manually.
+internal Str8
+parse_to_string(Parser *p)
+{
+  StrBuilder8 b = str8_init(KiB(1));
+
+  for (AstStmt *stmt = p->statements; stmt != 0; stmt = stmt->next)
+  {
+    switch (stmt->tag)
+    {
+      case AstStmt_Let:
+        str8_append(&b, stmt->data.let.token.value);
+        str8_append_lit(&b, " ");
+        str8_append(&b, stmt->data.let.identifier->token.value);
+        str8_append_lit(&b, " = ");
+        // TODO(tad): print expression
+        str8_append_lit(&b, ";");
+        break;
+      case AstStmt_Ret:
+        str8_append(&b, stmt->data.ret.token.value);
+        str8_append_lit(&b, " ");
+        // TODO(tad): print expression
+        str8_append_lit(&b, ";");
+        break;
+      case AstStmt_Expr: parse_build_expr_string(&b, stmt->data.expr.expr); break;
+      case AstStmt_COUNT:
+      default: str8_append_lit(&b, "[INVALID STATEMENT TAG]"); break;
+    }
+
+    str8_append_lit(&b, "\n");
+  }
+
+  return str8_build(&b);
 }
 
 internal void
@@ -685,6 +811,7 @@ parse_error(Parser *p, MessageLevel level, char const *fmt, ...)
   }
 
   p->message_list.last = m;
+  p->message_list.count += 1;
 }
 
 internal void
@@ -711,12 +838,6 @@ parse_expect(Parser *p, TokenKind kind)
                 str8_va(token_name(p->peek_token.kind)));
     return false;
   }
-}
-
-internal void
-parse_free(Parser *p)
-{
-  arena_free(p->arena);
 }
 
 // TODO(tad): consider printing complete AST and individual nodes for debugging/testing
@@ -825,6 +946,8 @@ parse_expr(Parser *p, Precedence precedence)
         Precedence infix_precedence = parse_get_precedence(p->curr_token.kind);
         parse_advance_token(p);
         infix->data.infix.rhs = parse_expr(p, infix_precedence);
+
+        lhs = infix;
         break;
       }
 
@@ -1045,20 +1168,32 @@ main(int argc, char *argv[])
 
   lex_print(input);
 
+  Parser p            = parse(input);
+  Str8 parsed_program = parse_to_string(&p);
+  printf("\nParsed program:\n\n");
+  printf("%.*s\n", str8_va(parsed_program));
+  if (p.message_list.count > 0)
+  {
+    printf("\n---------------\n\n");
+    parse_print_messages(&p);
+  }
+  free((void *)parsed_program.buf);
+  parse_free(&p);
+
   return 0;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 // test
 
-#define test_assert_m(test, fmt, ...)                               \
-  do                                                                \
-  {                                                                 \
-    if (!(test))                                                    \
-    {                                                               \
-      printf("\033[0;31mfailure: " fmt "\033[0m\n", ##__VA_ARGS__); \
-      return 1;                                                     \
-    }                                                               \
+#define test_assert_m(test, fmt, ...)                                                           \
+  do                                                                                            \
+  {                                                                                             \
+    if (!(test))                                                                                \
+    {                                                                                           \
+      printf("\033[0;31m(%s:%d) failure: " fmt "\033[0m\n", __func__, __LINE__, ##__VA_ARGS__); \
+      return 1;                                                                                 \
+    }                                                                                           \
   } while (0)
 #define test_assert(test) test_assert_m(test, "test error");
 
@@ -1252,6 +1387,8 @@ test_parse_stmt_expr(void)
                 arr_count(expected_identifiers),
                 i);
 
+  parse_free(&p);
+
   return 0;
 }
 
@@ -1273,12 +1410,14 @@ test_parse_expr_identifier(void)
   usize i = 0;
   for (AstStmt *stmt = p.statements; stmt != 0; stmt = stmt->next, i++)
   {
-    test_assert_m(stmt->data.expr.expr->tag == AstExpr_Identifier, "expected identifier expression");
-    test_assert_m(
-    str8_equal(stmt->data.expr.expr->data.identifier.token.value, expected_identifiers[i]),
-    "expected identifier expression '%.*s', parsed '%.*s'",
-    str8_va(expected_identifiers[i]),
-    str8_va(stmt->data.expr.token.value));
+    test_assert_m(stmt->tag == AstStmt_Expr, "expected expression statement");
+
+    AstExpr *expr = stmt->data.expr.expr;
+    test_assert_m(expr->tag == AstExpr_Identifier, "expected identifier expression");
+    test_assert_m(str8_equal(expr->data.identifier.token.value, expected_identifiers[i]),
+                  "expected identifier expression '%.*s', parsed '%.*s'",
+                  str8_va(expected_identifiers[i]),
+                  str8_va(expr->data.identifier.token.value));
   }
 
   test_assert_m(arr_count(expected_identifiers) == i,
@@ -1286,16 +1425,19 @@ test_parse_expr_identifier(void)
                 arr_count(expected_identifiers),
                 i);
 
+  parse_free(&p);
+
   return 0;
 }
 
 internal int
 test_parse_expr_number(void)
 {
-  Str8 input = str8_lit("42069;");
+  Str8 input = str8_lit("42069; 32");
 
-  Str8 expected_numbers[] = {
-    str8_cti("42069"),
+  s64 expected_numbers[] = {
+    42069,
+    32,
   };
 
   Parser p = parse(input);
@@ -1306,18 +1448,123 @@ test_parse_expr_number(void)
   usize i = 0;
   for (AstStmt *stmt = p.statements; stmt != 0; stmt = stmt->next, i++)
   {
-    test_assert_m(stmt->data.expr.expr->tag == AstExpr_Number, "expected number expression");
-    test_assert_m(str8_equal(stmt->data.expr.expr->data.number.token.value, expected_numbers[i]),
-                  "expected identifier expression '%.*s', parsed '%.*s'",
-                  str8_va(expected_numbers[i]),
-                  str8_va(stmt->data.expr.token.value));
-    test_assert(stmt->data.expr.expr->data.number.value == 42069);
+    test_assert_m(stmt->tag == AstStmt_Expr, "expected expression statement");
+
+    AstExpr *expr = stmt->data.expr.expr;
+    test_assert_m(expr->tag == AstExpr_Number, "expected number expression");
+    test_assert_m(expr->data.number.value == expected_numbers[i],
+                  "expected number expression '%lld', parsed '%lld'",
+                  expected_numbers[i],
+                  expr->data.number.value);
   }
 
   test_assert_m(arr_count(expected_numbers) == i,
                 "expected %zu statements, parsed %zu",
                 arr_count(expected_numbers),
                 i);
+
+  parse_free(&p);
+
+  return 0;
+}
+
+internal int
+test_parse_expr_prefix(void)
+{
+  struct
+  {
+    Str8 input;
+    TokenKind op;
+    s64 num;
+  } tests[] = {
+    { .input = str8_cti("!5;"),  .op = TokenKind_Bang, .num = 5 },
+    { .input = str8_cti("-4;"), .op = TokenKind_Minus, .num = 4 },
+  };
+
+  for (usize i = 0; i < arr_count(tests); i++)
+  {
+    Parser p = parse(tests[i].input);
+    parse_print_messages(&p);
+
+    test_assert_m(p.message_list.level <= MessageLevel_Info, "unexpected parse errors");
+
+    AstStmt *stmt = p.statements;
+    test_assert_m(stmt->next == 0, "expected one statement, parsed more");
+    test_assert_m(stmt->tag == AstStmt_Expr, "expected expression statement");
+
+    AstExpr *expr = stmt->data.expr.expr;
+    test_assert_m(expr->tag == AstExpr_Prefix, "expected prefix expression");
+    test_assert_m(expr->data.prefix.token.kind == tests[i].op,
+                  "expected '%.*s' prefix expression, parsed '%.*s'",
+                  str8_va(token_name(tests[i].op)),
+                  str8_va(token_name(expr->data.prefix.token.kind)));
+    test_assert_m(expr->data.prefix.rhs->data.number.value == tests[i].num,
+                  "expected prefixed number expression '%lld', parsed '%lld'",
+                  tests[i].num,
+                  expr->data.prefix.rhs->data.number.value);
+
+    parse_free(&p);
+  }
+
+  return 0;
+}
+
+internal int
+test_parse_expr_infix(void)
+{
+  struct
+  {
+    Str8 input;
+    TokenKind op;
+    s64 num1;
+    s64 num2;
+  } tests[] = {
+    { .input = str8_cti("5  + 4;"),     .op = TokenKind_Plus, .num1 = 5, .num2 = 4 },
+    { .input = str8_cti("6  - 5;"),    .op = TokenKind_Minus, .num1 = 6, .num2 = 5 },
+    { .input = str8_cti("7  * 6;"),     .op = TokenKind_Star, .num1 = 7, .num2 = 6 },
+    { .input = str8_cti("8  / 7;"),    .op = TokenKind_Slash, .num1 = 8, .num2 = 7 },
+    { .input = str8_cti("9  > 8;"),  .op = TokenKind_Greater, .num1 = 9, .num2 = 8 },
+    { .input = str8_cti("8  < 9;"),     .op = TokenKind_Less, .num1 = 8, .num2 = 9 },
+    { .input = str8_cti("7 == 8;"),    .op = TokenKind_Equal, .num1 = 7, .num2 = 8 },
+    { .input = str8_cti("6 != 7;"), .op = TokenKind_NotEqual, .num1 = 6, .num2 = 7 },
+  };
+
+  for (usize i = 0; i < arr_count(tests); i++)
+  {
+    Parser p = parse(tests[i].input);
+    parse_print_messages(&p);
+
+    test_assert_m(p.message_list.level <= MessageLevel_Info, "unexpected parse errors");
+
+    AstStmt *stmt = p.statements;
+    test_assert_m(stmt->next == 0, "expected one statement, parsed more");
+    test_assert_m(stmt->tag == AstStmt_Expr, "expected expression statement");
+
+    AstExpr *expr = stmt->data.expr.expr;
+    test_assert_m(expr->tag == AstExpr_Infix, "expected infix expression");
+    test_assert_m(expr->data.infix.token.kind == tests[i].op,
+                  "expected '%.*s' infix expression, parsed '%.*s'",
+                  str8_va(token_name(tests[i].op)),
+                  str8_va(token_name(expr->data.infix.token.kind)));
+    test_assert_m(expr->data.infix.lhs->data.number.value == tests[i].num1,
+                  "expected infix lhs '%lld', parsed '%lld'",
+                  tests[i].num1,
+                  expr->data.infix.lhs->data.number.value);
+    test_assert_m(expr->data.infix.rhs->data.number.value == tests[i].num2,
+                  "expected infix rhs '%lld', parsed '%lld'",
+                  tests[i].num2,
+                  expr->data.infix.rhs->data.number.value);
+
+    parse_free(&p);
+  }
+
+  return 0;
+}
+
+internal int
+test_parse_op_precedence(void)
+{
+  test_assert(false);
 
   return 0;
 }
@@ -1328,12 +1575,17 @@ test(void)
   int result = 0;
 
   result += test_lex();
+
   result += test_parse_stmt_let();
   result += test_parse_stmt_ret();
   result += test_parse_stmt_expr();
 
   result += test_parse_expr_identifier();
   result += test_parse_expr_number();
+  result += test_parse_expr_prefix();
+  result += test_parse_expr_infix();
+
+  result += test_parse_op_precedence();
 
   return result;
 }
