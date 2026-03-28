@@ -140,7 +140,7 @@ internal void
 str8_append_char(StrBuilder8 *builder, u8 value)
 {
   str8_ensure_capacity(builder, builder->len + 1);
-  builder->buf[builder->len - 1] = value;
+  builder->buf[builder->len] = value;
   builder->len += 1;
 }
 
@@ -148,7 +148,8 @@ str8_append_char(StrBuilder8 *builder, u8 value)
 internal Str8
 str8_build(StrBuilder8 *builder)
 {
-  str8_append_char(builder, 0);
+  str8_ensure_capacity(builder, builder->len + 1);
+  builder->buf[builder->len] = 0;
   return str8(builder->buf, builder->len);
 }
 
@@ -732,7 +733,7 @@ parse_build_expr_string(StrBuilder8 *b, AstExpr *expr)
 // NOTE(tad): This is entirely for debugging purposes and should not otherwise be used.
 // Uses `malloc`, so the return value must be freed manually.
 internal Str8
-parse_to_string(Parser *p)
+parse_to_string(Parser *p, b32 break_statements)
 {
   StrBuilder8 b = str8_init(KiB(1));
 
@@ -759,7 +760,7 @@ parse_to_string(Parser *p)
       default: str8_append_lit(&b, "[INVALID STATEMENT TAG]"); break;
     }
 
-    str8_append_lit(&b, "\n");
+    if (break_statements) str8_append_lit(&b, "\n");
   }
 
   return str8_build(&b);
@@ -1169,7 +1170,7 @@ main(int argc, char *argv[])
   lex_print(input);
 
   Parser p            = parse(input);
-  Str8 parsed_program = parse_to_string(&p);
+  Str8 parsed_program = parse_to_string(&p, true);
   printf("\nParsed program:\n\n");
   printf("%.*s\n", str8_va(parsed_program));
   if (p.message_list.count > 0)
@@ -1564,7 +1565,42 @@ test_parse_expr_infix(void)
 internal int
 test_parse_op_precedence(void)
 {
-  test_assert(false);
+  struct
+  {
+    Str8 input;
+    Str8 expected;
+  } tests[] = {
+    {                     str8_cti("-a * b"),                             str8_cti("((-a) * b)") },
+    {                        str8_cti("!-a"),                                str8_cti("(!(-a))") },
+    {                  str8_cti("a + b + c"),                          str8_cti("((a + b) + c)") },
+    {                  str8_cti("a + b - c"),                          str8_cti("((a + b) - c)") },
+    {                  str8_cti("a * b * c"),                          str8_cti("((a * b) * c)") },
+    {                  str8_cti("a * b / c"),                          str8_cti("((a * b) / c)") },
+    {                  str8_cti("a + b / c"),                          str8_cti("(a + (b / c))") },
+    {      str8_cti("a + b * c + d / e - f"),        str8_cti("(((a + (b * c)) + (d / e)) - f)") },
+    {              str8_cti("3 + 4; -5 * 5"),                      str8_cti("(3 + 4)((-5) * 5)") },
+    {             str8_cti("5 > 4 == 3 < 4"),                   str8_cti("((5 > 4) == (3 < 4))") },
+    {             str8_cti("5 < 4 != 3 > 4"),                   str8_cti("((5 < 4) != (3 > 4))") },
+    { str8_cti("3 + 4 * 5 == 3 * 1 + 4 * 5"), str8_cti("((3 + (4 * 5)) == ((3 * 1) + (4 * 5)))") },
+  };
+
+  for (usize i = 0; i < arr_count(tests); i++)
+  {
+    Parser p = parse(tests[i].input);
+    parse_print_messages(&p);
+
+    test_assert_m(p.message_list.level <= MessageLevel_Info, "unexpected parse errors");
+
+    Str8 actual = parse_to_string(&p, false);
+
+    test_assert_m(str8_equal(tests[i].expected, actual),
+                  "expected precedence of '%.*s', parsed '%.*s'",
+                  str8_va(tests[i].expected),
+                  str8_va(actual));
+
+    free((void *)actual.buf);
+    parse_free(&p);
+  }
 
   return 0;
 }
