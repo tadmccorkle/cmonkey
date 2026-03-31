@@ -1,6 +1,5 @@
 #include <assert.h>
 #include <ctype.h>
-#include <math.h>
 #include <stdarg.h>
 #include <stdatomic.h>
 #include <stdbool.h>
@@ -309,6 +308,7 @@ is_letter(u8 ch)
   return ('a' <= ch && ch <= 'z') || ('A' <= ch && ch <= 'Z');
 }
 
+// TODO(tad): Use ASCII values for corresponding token kind values?
 #define TOKEN_KINDS(X)         \
   X(TokenKind_Illegal)         \
   X(TokenKind_EOF)             \
@@ -376,16 +376,11 @@ struct Token
   TokenKind kind;
 };
 
-internal const Token invalid_token = { .kind = TokenKind_Illegal };
-
 internal Token keyword_tokens[] = {
-  {     str8_cti("fn"), TokenKind_Function },
-  {    str8_cti("let"),      TokenKind_Let },
-  {   str8_cti("true"),     TokenKind_True },
-  {  str8_cti("false"),    TokenKind_False },
-  {     str8_cti("if"),       TokenKind_If },
-  {   str8_cti("else"),     TokenKind_Else },
-  { str8_cti("return"),   TokenKind_Return },
+  { str8_lit("fn"), TokenKind_Function },   { str8_lit("let"), TokenKind_Let },
+  { str8_lit("true"), TokenKind_True },     { str8_lit("false"), TokenKind_False },
+  { str8_lit("if"), TokenKind_If },         { str8_lit("else"), TokenKind_Else },
+  { str8_lit("return"), TokenKind_Return },
 };
 
 typedef struct Lexer Lexer;
@@ -1263,7 +1258,7 @@ test_lex(void)
                         "@\n"
                         "");
 
-#define test_result(kind, literal) { str8_cti(literal), kind }
+#define test_result(kind, literal) { str8_lit(literal), kind }
   Token test_results[] = {
     test_result(TokenKind_Let, "let"),        test_result(TokenKind_Identifier, "five"),
     test_result(TokenKind_Assign, "="),       test_result(TokenKind_Number, "5"),
@@ -1371,7 +1366,7 @@ test_boolean_expr(AstExpr *expr, b8 expected)
   test_assert_m(expr->tag == AstExpr_Boolean, "expected boolean expression");
 
   b8 actual = expr->data.boolean.value;
-  test_assert_m(actual == expected, "expected number expression '%d', parsed '%d'", expected, actual);
+  test_assert_m(actual == expected, "expected boolean expression '%d', parsed '%d'", expected, actual);
 
   return 0;
 }
@@ -1391,15 +1386,21 @@ test_literal_expr(AstExpr *expr, AstExprKind expected_kind, void *expected)
   return 0;
 }
 
-typedef struct ExpectedLitExpr ExpectedExpr;
+typedef struct ExpectedLitExpr ExpectedLitExpr;
 struct ExpectedLitExpr
 {
   AstExprKind kind;
   void *value;
 };
 
+#define expected_lit(kind_, type_, value_)                 \
+  (ExpectedLitExpr)                                        \
+  {                                                        \
+    .kind = (kind_), .value = &((type_[]){ (value_) })[0], \
+  }
+
 internal int
-test_prefix_lit_expr(AstExpr *expr, TokenKind expected_op, ExpectedExpr expected_rhs)
+test_prefix_lit_expr(AstExpr *expr, TokenKind expected_op, ExpectedLitExpr expected_rhs)
 {
   test_assert_m(expr->tag == AstExpr_Prefix, "expected prefix expression");
   test_assert_m(expr->data.prefix.token.kind == expected_op,
@@ -1412,7 +1413,10 @@ test_prefix_lit_expr(AstExpr *expr, TokenKind expected_op, ExpectedExpr expected
 }
 
 internal int
-test_infix_lit_expr(AstExpr *expr, TokenKind expected_op, ExpectedExpr expected_lhs, ExpectedExpr expected_rhs)
+test_infix_lit_expr(AstExpr *expr,
+                    TokenKind expected_op,
+                    ExpectedLitExpr expected_lhs,
+                    ExpectedLitExpr expected_rhs)
 {
   test_assert_m(expr->tag == AstExpr_Infix, "expected infix expression");
   test_assert_m(expr->data.infix.token.kind == expected_op,
@@ -1440,8 +1444,8 @@ test_parse_stmt_let(void)
   Str8 input = str8_lit("let x = 5; let y = 10;");
 
   Str8 expected_identifiers[] = {
-    str8_cti("x"),
-    str8_cti("y"),
+    str8_lit("x"),
+    str8_lit("y"),
   };
 
   Parser p = parse(input);
@@ -1492,11 +1496,8 @@ test_parse_stmt_ret(void)
 internal int
 test_parse_stmt_expr(void)
 {
-  Str8 input = str8_lit("test_identifier;");
-
-  Str8 expected_identifiers[] = {
-    str8_cti("test_identifier"),
-  };
+  Str8 input                  = str8_lit("test_identifier;");
+  Str8 expected_identifiers[] = { str8_lit("test_identifier") };
 
   Parser p = parse(input);
   test_helper(test_parse_check_messages(&p));
@@ -1521,12 +1522,8 @@ test_parse_stmt_expr(void)
 internal int
 test_parse_expr_identifier(void)
 {
-  Str8 input = str8_lit("test_identifier; other_test_identifier");
-
-  Str8 expected_identifiers[] = {
-    str8_cti("test_identifier"),
-    str8_cti("other_test_identifier"),
-  };
+  Str8 input                  = str8_lit("test_identifier; test_identifier2");
+  Str8 expected_identifiers[] = { str8_lit("test_identifier"), str8_lit("test_identifier2") };
 
   Parser p = parse(input);
   test_helper(test_parse_check_messages(&p));
@@ -1551,12 +1548,8 @@ test_parse_expr_identifier(void)
 internal int
 test_parse_expr_number(void)
 {
-  Str8 input = str8_lit("42069; 32");
-
-  s64 expected_numbers[] = {
-    42069,
-    32,
-  };
+  Str8 input             = str8_lit("42069; 32");
+  s64 expected_numbers[] = { 42069, 32 };
 
   Parser p = parse(input);
   test_helper(test_parse_check_messages(&p));
@@ -1581,15 +1574,18 @@ test_parse_expr_number(void)
 internal int
 test_parse_expr_prefix(void)
 {
-  // TODO(tad): add tests with more literals
   struct
   {
     Str8 input;
     TokenKind op;
-    s64 num;
+    ExpectedLitExpr expected;
   } tests[] = {
-    { .input = str8_cti("!5;"),  .op = TokenKind_Bang, .num = 5 },
-    { .input = str8_cti("-4;"), .op = TokenKind_Minus, .num = 4 },
+    { str8_lit("!5;"), TokenKind_Bang, expected_lit(AstExpr_Number, s64, 5) },
+    { str8_lit("-4;"), TokenKind_Minus, expected_lit(AstExpr_Number, s64, 4) },
+    { str8_lit("!fb;"), TokenKind_Bang, expected_lit(AstExpr_Identifier, Str8, str8_lit("fb")) },
+    { str8_lit("-fb;"), TokenKind_Minus, expected_lit(AstExpr_Identifier, Str8, str8_lit("fb")) },
+    { str8_lit("!true;"), TokenKind_Bang, expected_lit(AstExpr_Boolean, b8, true) },
+    { str8_lit("!false;"), TokenKind_Bang, expected_lit(AstExpr_Boolean, b8, false) },
   };
 
   for (usize i = 0; i < arr_count(tests); i++)
@@ -1600,10 +1596,7 @@ test_parse_expr_prefix(void)
     AstStmt *stmt = p.statements;
     test_assert_m(stmt->next == 0, "expected one statement, parsed more");
     test_assert_m(stmt->tag == AstStmt_Expr, "expected expression statement");
-
-    test_helper(test_prefix_lit_expr(stmt->data.expr.expr,
-                                     tests[i].op,
-                                     (ExpectedExpr){ .kind = AstExpr_Number, .value = &tests[i].num }));
+    test_helper(test_prefix_lit_expr(stmt->data.expr.expr, tests[i].op, tests[i].expected));
 
     parse_free(&p);
   }
@@ -1614,22 +1607,127 @@ test_parse_expr_prefix(void)
 internal int
 test_parse_expr_infix(void)
 {
-  // TODO(tad): add tests with more literals
   struct
   {
     Str8 input;
     TokenKind op;
-    s64 num1;
-    s64 num2;
+    ExpectedLitExpr lhs;
+    ExpectedLitExpr rhs;
   } tests[] = {
-    { .input = str8_cti("5  + 4;"),     .op = TokenKind_Plus, .num1 = 5, .num2 = 4 },
-    { .input = str8_cti("6  - 5;"),    .op = TokenKind_Minus, .num1 = 6, .num2 = 5 },
-    { .input = str8_cti("7  * 6;"),     .op = TokenKind_Star, .num1 = 7, .num2 = 6 },
-    { .input = str8_cti("8  / 7;"),    .op = TokenKind_Slash, .num1 = 8, .num2 = 7 },
-    { .input = str8_cti("9  > 8;"),  .op = TokenKind_Greater, .num1 = 9, .num2 = 8 },
-    { .input = str8_cti("8  < 9;"),     .op = TokenKind_Less, .num1 = 8, .num2 = 9 },
-    { .input = str8_cti("7 == 8;"),    .op = TokenKind_Equal, .num1 = 7, .num2 = 8 },
-    { .input = str8_cti("6 != 7;"), .op = TokenKind_NotEqual, .num1 = 6, .num2 = 7 },
+    {
+      str8_lit("5  + 4;"),
+      TokenKind_Plus,
+      expected_lit(AstExpr_Number, s64, 5),
+      expected_lit(AstExpr_Number, s64, 4),
+    },
+    {
+      str8_lit("6  - 5;"),
+      TokenKind_Minus,
+      expected_lit(AstExpr_Number, s64, 6),
+      expected_lit(AstExpr_Number, s64, 5),
+    },
+    {
+      str8_lit("7  * 6;"),
+      TokenKind_Star,
+      expected_lit(AstExpr_Number, s64, 7),
+      expected_lit(AstExpr_Number, s64, 6),
+    },
+    {
+      str8_lit("8  / 7;"),
+      TokenKind_Slash,
+      expected_lit(AstExpr_Number, s64, 8),
+      expected_lit(AstExpr_Number, s64, 7),
+    },
+    {
+      str8_lit("9  > 8;"),
+      TokenKind_Greater,
+      expected_lit(AstExpr_Number, s64, 9),
+      expected_lit(AstExpr_Number, s64, 8),
+    },
+    {
+      str8_lit("8  < 9;"),
+      TokenKind_Less,
+      expected_lit(AstExpr_Number, s64, 8),
+      expected_lit(AstExpr_Number, s64, 9),
+    },
+    {
+      str8_lit("7 == 8;"),
+      TokenKind_Equal,
+      expected_lit(AstExpr_Number, s64, 7),
+      expected_lit(AstExpr_Number, s64, 8),
+    },
+    {
+      str8_lit("6 != 7;"),
+      TokenKind_NotEqual,
+      expected_lit(AstExpr_Number, s64, 6),
+      expected_lit(AstExpr_Number, s64, 7),
+    },
+    {
+      str8_lit("a + b;"),
+      TokenKind_Plus,
+      expected_lit(AstExpr_Identifier, Str8, str8_lit("a")),
+      expected_lit(AstExpr_Identifier, Str8, str8_lit("b")),
+    },
+    {
+      str8_lit("a - b;"),
+      TokenKind_Minus,
+      expected_lit(AstExpr_Identifier, Str8, str8_lit("a")),
+      expected_lit(AstExpr_Identifier, Str8, str8_lit("b")),
+    },
+    {
+      str8_lit("a * b;"),
+      TokenKind_Star,
+      expected_lit(AstExpr_Identifier, Str8, str8_lit("a")),
+      expected_lit(AstExpr_Identifier, Str8, str8_lit("b")),
+    },
+    {
+      str8_lit("a / b;"),
+      TokenKind_Slash,
+      expected_lit(AstExpr_Identifier, Str8, str8_lit("a")),
+      expected_lit(AstExpr_Identifier, Str8, str8_lit("b")),
+    },
+    {
+      str8_lit("a > b;"),
+      TokenKind_Greater,
+      expected_lit(AstExpr_Identifier, Str8, str8_lit("a")),
+      expected_lit(AstExpr_Identifier, Str8, str8_lit("b")),
+    },
+    {
+      str8_lit("a < b;"),
+      TokenKind_Less,
+      expected_lit(AstExpr_Identifier, Str8, str8_lit("a")),
+      expected_lit(AstExpr_Identifier, Str8, str8_lit("b")),
+    },
+    {
+      str8_lit("a == b;"),
+      TokenKind_Equal,
+      expected_lit(AstExpr_Identifier, Str8, str8_lit("a")),
+      expected_lit(AstExpr_Identifier, Str8, str8_lit("b")),
+    },
+    {
+      str8_lit("a != b;"),
+      TokenKind_NotEqual,
+      expected_lit(AstExpr_Identifier, Str8, str8_lit("a")),
+      expected_lit(AstExpr_Identifier, Str8, str8_lit("b")),
+    },
+    {
+      str8_lit("true == true"),
+      TokenKind_Equal,
+      expected_lit(AstExpr_Boolean, b8, true),
+      expected_lit(AstExpr_Boolean, b8, true),
+    },
+    {
+      str8_lit("true != false"),
+      TokenKind_NotEqual,
+      expected_lit(AstExpr_Boolean, b8, true),
+      expected_lit(AstExpr_Boolean, b8, false),
+    },
+    {
+      str8_lit("false == false"),
+      TokenKind_Equal,
+      expected_lit(AstExpr_Boolean, b8, false),
+      expected_lit(AstExpr_Boolean, b8, false),
+    },
   };
 
   for (usize i = 0; i < arr_count(tests); i++)
@@ -1640,11 +1738,7 @@ test_parse_expr_infix(void)
     AstStmt *stmt = p.statements;
     test_assert_m(stmt->next == 0, "expected one statement, parsed more");
     test_assert_m(stmt->tag == AstStmt_Expr, "expected expression statement");
-
-    test_helper(test_infix_lit_expr(stmt->data.expr.expr,
-                                    tests[i].op,
-                                    (ExpectedExpr){ .kind = AstExpr_Number, .value = &tests[i].num1 },
-                                    (ExpectedExpr){ .kind = AstExpr_Number, .value = &tests[i].num2 }));
+    test_helper(test_infix_lit_expr(stmt->data.expr.expr, tests[i].op, tests[i].lhs, tests[i].rhs));
 
     parse_free(&p);
   }
@@ -1660,18 +1754,70 @@ test_parse_op_precedence(void)
     Str8 input;
     Str8 expected;
   } tests[] = {
-    {                     str8_cti("-a * b"),                             str8_cti("((-a) * b)") },
-    {                        str8_cti("!-a"),                                str8_cti("(!(-a))") },
-    {                  str8_cti("a + b + c"),                          str8_cti("((a + b) + c)") },
-    {                  str8_cti("a + b - c"),                          str8_cti("((a + b) - c)") },
-    {                  str8_cti("a * b * c"),                          str8_cti("((a * b) * c)") },
-    {                  str8_cti("a * b / c"),                          str8_cti("((a * b) / c)") },
-    {                  str8_cti("a + b / c"),                          str8_cti("(a + (b / c))") },
-    {      str8_cti("a + b * c + d / e - f"),        str8_cti("(((a + (b * c)) + (d / e)) - f)") },
-    {              str8_cti("3 + 4; -5 * 5"),                      str8_cti("(3 + 4)((-5) * 5)") },
-    {             str8_cti("5 > 4 == 3 < 4"),                   str8_cti("((5 > 4) == (3 < 4))") },
-    {             str8_cti("5 < 4 != 3 > 4"),                   str8_cti("((5 < 4) != (3 > 4))") },
-    { str8_cti("3 + 4 * 5 == 3 * 1 + 4 * 5"), str8_cti("((3 + (4 * 5)) == ((3 * 1) + (4 * 5)))") },
+    {
+      str8_lit("-a * b"),
+      str8_lit("((-a) * b)"),
+    },
+    {
+      str8_lit("!-a"),
+      str8_lit("(!(-a))"),
+    },
+    {
+      str8_lit("a + b + c"),
+      str8_lit("((a + b) + c)"),
+    },
+    {
+      str8_lit("a + b - c"),
+      str8_lit("((a + b) - c)"),
+    },
+    {
+      str8_lit("a * b * c"),
+      str8_lit("((a * b) * c)"),
+    },
+    {
+      str8_lit("a * b / c"),
+      str8_lit("((a * b) / c)"),
+    },
+    {
+      str8_lit("a + b / c"),
+      str8_lit("(a + (b / c))"),
+    },
+    {
+      str8_lit("a + b * c + d / e - f"),
+      str8_lit("(((a + (b * c)) + (d / e)) - f)"),
+    },
+    {
+      str8_lit("3 + 4; -5 * 5"),
+      str8_lit("(3 + 4)((-5) * 5)"),
+    },
+    {
+      str8_lit("5 > 4 == 3 < 4"),
+      str8_lit("((5 > 4) == (3 < 4))"),
+    },
+    {
+      str8_lit("5 < 4 != 3 > 4"),
+      str8_lit("((5 < 4) != (3 > 4))"),
+    },
+    {
+      str8_lit("3 + 4 * 5 == 3 * 1 + 4 * 5"),
+      str8_lit("((3 + (4 * 5)) == ((3 * 1) + (4 * 5)))"),
+    },
+    {
+      str8_lit("true"),
+      str8_lit("true"),
+    },
+    {
+      str8_lit("false"),
+      str8_lit("false"),
+    },
+    {
+      str8_lit("3 > 5 == false"),
+      str8_lit("((3 > 5) == false)"),
+    },
+    {
+      str8_lit("3 < 5 == true"),
+      str8_lit("((3 < 5) == true)"),
+    },
   };
 
   for (usize i = 0; i < arr_count(tests); i++)

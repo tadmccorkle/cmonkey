@@ -17,7 +17,7 @@ PenaltyExcessCharacter: 5
 PenaltyIndentedWhitespace: 0
 PenaltyReturnTypeOnItsOwnLine: 0
 AlignAfterOpenBracket: Align
-AlignArrayOfStructures: Right
+AlignArrayOfStructures: None
 AlignConsecutiveAssignments: Consecutive
 AlignConsecutiveBitFields: Consecutive
 AlignConsecutiveDeclarations: None
@@ -60,7 +60,7 @@ BreakBeforeTernaryOperators: true
 BreakBinaryOperations: RespectPrecedence
 BreakFunctionDefinitionParameters: false
 BreakStringLiterals: true
-CommentPragmas: ''
+CommentPragmas: ""
 ContinuationIndentWidth: 0
 Cpp11BracedListStyle: false
 DerivePointerAlignment: false
