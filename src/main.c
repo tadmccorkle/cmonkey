@@ -586,10 +586,12 @@ typedef enum
   AstExpr_Boolean,
   AstExpr_Prefix,
   AstExpr_Infix,
+  AstExpr_IfElse,
   // ...
   AstExpr_COUNT,
 } AstExprKind;
 
+typedef struct AstStmt AstStmt;
 typedef struct AstExpr AstExpr;
 
 typedef struct AstExprIdentifier AstExprIdentifier;
@@ -627,6 +629,22 @@ struct AstExprInfix
   AstExpr *rhs;
 };
 
+typedef struct AstStmtBlock AstStmtBlock;
+struct AstStmtBlock
+{
+  Token token;
+  AstStmt *statements;
+};
+
+typedef struct AstExprIf AstExprIf;
+struct AstExprIf
+{
+  Token token;
+  AstExpr *condition;
+  AstStmtBlock *consequence;
+  AstStmtBlock *alternative;
+};
+
 struct AstExpr
 {
   AstExprKind tag;
@@ -637,7 +655,7 @@ struct AstExpr
     AstExprBoolean boolean;
     AstExprPrefix prefix;
     AstExprInfix infix;
-    // ...
+    AstExprIf if_else;
   } data;
 };
 
@@ -649,7 +667,6 @@ typedef enum
   AstStmt_COUNT,
 } AstStmtKind;
 
-typedef struct AstStmt AstStmt;
 struct AstStmt
 {
   AstStmt *next;
@@ -705,6 +722,9 @@ parse_free(Parser *p)
   arena_free(p->arena);
 }
 
+internal void parse_build_stmt_string(StrBuilder8 *b, AstStmt *statements);
+internal void parse_build_expr_string(StrBuilder8 *b, AstExpr *expr);
+
 internal void
 parse_build_expr_string(StrBuilder8 *b, AstExpr *expr)
 {
@@ -733,44 +753,61 @@ parse_build_expr_string(StrBuilder8 *b, AstExpr *expr)
       str8_append_lit(b, ")");
       break;
 
+    case AstExpr_IfElse:
+      str8_append_lit(b, "if ");
+      parse_build_expr_string(b, expr->data.if_else.condition);
+      str8_append_lit(b, " {");
+      parse_build_stmt_string(b, expr->data.if_else.consequence->statements);
+      str8_append_lit(b, "}");
+      if (expr->data.if_else.alternative != 0)
+      {
+        str8_append_lit(b, " else {");
+        parse_build_stmt_string(b, expr->data.if_else.alternative->statements);
+        str8_append_lit(b, "}");
+      }
+      break;
+
     default: str8_append_lit(b, "[INVALID EXPRESSION TAG]"); break;
+  }
+}
+
+internal void
+parse_build_stmt_string(StrBuilder8 *b, AstStmt *statements)
+{
+  for (AstStmt *stmt = statements; stmt != 0; stmt = stmt->next)
+  {
+    switch (stmt->tag)
+    {
+      case AstStmt_Let:
+        str8_append(b, stmt->data.let.token.value);
+        str8_append_lit(b, " ");
+        str8_append(b, stmt->data.let.identifier->token.value);
+        str8_append_lit(b, " = ");
+        parse_build_expr_string(b, stmt->data.let.expr);
+        str8_append_lit(b, ";");
+        break;
+
+      case AstStmt_Ret:
+        str8_append(b, stmt->data.ret.token.value);
+        str8_append_lit(b, " ");
+        parse_build_expr_string(b, stmt->data.ret.expr);
+        str8_append_lit(b, ";");
+        break;
+
+      case AstStmt_Expr: parse_build_expr_string(b, stmt->data.expr.expr); break;
+
+      default: str8_append_lit(b, "[INVALID STATEMENT TAG]"); break;
+    }
   }
 }
 
 // NOTE(tad): This is entirely for debugging/testing purposes and should not otherwise be used.
 // Uses `malloc`, so the return value must be freed manually.
 internal Str8
-parse_to_string(Parser *p, b32 break_statements)
+parse_to_string(Parser *p)
 {
   StrBuilder8 b = str8_init(KiB(1));
-
-  for (AstStmt *stmt = p->statements; stmt != 0; stmt = stmt->next)
-  {
-    switch (stmt->tag)
-    {
-      case AstStmt_Let:
-        str8_append(&b, stmt->data.let.token.value);
-        str8_append_lit(&b, " ");
-        str8_append(&b, stmt->data.let.identifier->token.value);
-        str8_append_lit(&b, " = ");
-        parse_build_expr_string(&b, stmt->data.let.expr);
-        str8_append_lit(&b, ";");
-        break;
-
-      case AstStmt_Ret:
-        str8_append(&b, stmt->data.ret.token.value);
-        str8_append_lit(&b, " ");
-        parse_build_expr_string(&b, stmt->data.ret.expr);
-        str8_append_lit(&b, ";");
-        break;
-
-      case AstStmt_Expr: parse_build_expr_string(&b, stmt->data.expr.expr); break;
-
-      default: str8_append_lit(&b, "[INVALID STATEMENT TAG]"); break;
-    }
-
-    if (break_statements) str8_append_lit(&b, "\n");
-  }
+  parse_build_stmt_string(&b, p->statements);
 
   return str8_build(&b);
 }
@@ -875,6 +912,38 @@ parse_get_precedence(TokenKind kind)
   }
 }
 
+internal AstStmt *parse_stmt(Parser *p);
+internal AstExpr *parse_expr(Parser *p, Precedence precedence);
+internal AstStmtBlock *parse_block(Parser *p);
+
+internal AstStmtBlock *
+parse_block(Parser *p)
+{
+  AstStmtBlock *block = arena_push_t(p->arena, AstStmtBlock);
+  block->token        = p->curr_token;
+
+  parse_advance_token(p);
+
+  AstStmt sentinel = { 0 };
+  AstStmt *tail    = &sentinel;
+
+  while (p->curr_token.kind != TokenKind_RBrace && p->curr_token.kind != TokenKind_EOF)
+  {
+    AstStmt *stmt = parse_stmt(p);
+    if (stmt)
+    {
+      tail->next = stmt;
+      tail       = stmt;
+    }
+
+    parse_advance_token(p);
+  }
+
+  block->statements = sentinel.next;
+
+  return block;
+}
+
 internal AstExpr *
 parse_expr(Parser *p, Precedence precedence)
 {
@@ -897,6 +966,7 @@ parse_expr(Parser *p, Precedence precedence)
         lhs                    = arena_push_t(p->arena, AstExpr);
         lhs->tag               = AstExpr_Number;
         lhs->data.number.token = p->curr_token;
+        // TODO(tad): handle error here
         lhs->data.number.value = strtoll((char *)p->curr_token.value.buf, 0, 10);
         break;
       }
@@ -922,14 +992,52 @@ parse_expr(Parser *p, Precedence precedence)
         break;
       }
 
+      case TokenKind_If:
+      {
+        Token if_token = p->curr_token;
+
+        if (!parse_expect(p, TokenKind_LParen)) break;
+        AstExpr *condition = parse_expr(p, Precedence_Lowest);
+        if (condition == 0) break;
+
+        if (!parse_expect(p, TokenKind_LBrace)) break;
+        AstStmtBlock *consequence = parse_block(p);
+
+        AstStmtBlock *alternative = 0;
+        if (p->peek_token.kind == TokenKind_Else)
+        {
+          parse_advance_token(p);
+          if (!parse_expect(p, TokenKind_LBrace)) break;
+          alternative = parse_block(p);
+        }
+
+        lhs                           = arena_push_t(p->arena, AstExpr);
+        lhs->tag                      = AstExpr_IfElse;
+        lhs->data.if_else.token       = if_token;
+        lhs->data.if_else.condition   = condition;
+        lhs->data.if_else.consequence = consequence;
+        lhs->data.if_else.alternative = alternative;
+        break;
+      }
+
       case TokenKind_LParen:
+      {
+        parse_advance_token(p);
+
+        AstExpr *grouped_expr = parse_expr(p, Precedence_Lowest);
+        if (parse_expect(p, TokenKind_RParen))
+        {
+          lhs = grouped_expr;
+        }
+        break;
+      }
+
       case TokenKind_RParen:
       case TokenKind_LBrace:
       case TokenKind_RBrace:
       case TokenKind_LBracket:
       case TokenKind_RBracket:
       case TokenKind_Function:
-      case TokenKind_If:
       case TokenKind_Else:
       default:
         parse_error(p,
@@ -980,6 +1088,122 @@ parse_expr(Parser *p, Precedence precedence)
   return lhs;
 }
 
+internal AstStmt *
+parse_stmt(Parser *p)
+{
+  AstStmt *stmt = 0;
+
+  switch (p->curr_token.kind)
+  {
+    // TODO(tad): some kinds are not appropriate here (e.g., semicolon)
+    case TokenKind_Identifier:
+    case TokenKind_Number:
+    case TokenKind_Assign:
+    case TokenKind_Plus:
+    case TokenKind_Minus:
+    case TokenKind_Bang:
+    case TokenKind_Star:
+    case TokenKind_Slash:
+    case TokenKind_Less:
+    case TokenKind_Greater:
+    case TokenKind_Equal:
+    case TokenKind_NotEqual:
+    case TokenKind_Comma:
+    case TokenKind_LParen:
+    case TokenKind_RParen:
+    case TokenKind_LBrace:
+    case TokenKind_RBrace:
+    case TokenKind_LBracket:
+    case TokenKind_RBracket:
+    case TokenKind_Function:
+    case TokenKind_True:
+    case TokenKind_False:
+    case TokenKind_If:
+    case TokenKind_Else:
+    {
+      stmt                  = arena_push_t(p->arena, AstStmt);
+      stmt->tag             = AstStmt_Expr;
+      stmt->data.expr.token = p->curr_token;
+      stmt->data.expr.expr  = parse_expr(p, Precedence_Lowest);
+
+      if (p->peek_token.kind == TokenKind_Semicolon)
+      {
+        parse_advance_token(p);
+      }
+
+      break;
+    }
+
+    case TokenKind_Let:
+    {
+      Token let_token   = p->curr_token;
+      Token ident_token = p->peek_token;
+      if (!parse_expect(p, TokenKind_Identifier)) break;
+      if (!parse_expect(p, TokenKind_Assign)) break;
+
+      // TODO(tad): parse expressions
+      while (p->curr_token.kind != TokenKind_Semicolon)
+      {
+        parse_advance_token(p);
+      }
+
+      stmt                          = arena_push_t(p->arena, AstStmt);
+      AstExprIdentifier *identifier = arena_push_t(p->arena, AstExprIdentifier);
+      // AstExpr *expr                 = arena_push_t(p.arena, AstExpr);
+
+      identifier->token = ident_token;
+
+      stmt->tag                 = AstStmt_Let;
+      stmt->data.let.token      = let_token;
+      stmt->data.let.identifier = identifier;
+      // stmt->data.let.expr = expr;
+      break;
+    }
+
+    case TokenKind_Return:
+    {
+      Token ret_token = p->curr_token;
+
+      // TODO(tad): parse expressions
+      while (p->curr_token.kind != TokenKind_Semicolon)
+      {
+        parse_advance_token(p);
+      }
+
+      stmt = arena_push_t(p->arena, AstStmt);
+        // AstExpr *expr                 = arena_push_t(p.arena, AstExpr);
+
+      stmt->tag            = AstStmt_Ret;
+      stmt->data.ret.token = ret_token;
+      // stmt->data.ret.expr = expr;
+      break;
+    }
+
+    case TokenKind_Semicolon: break;
+
+    case TokenKind_Illegal:
+    {
+      for (usize i = 0; i < p->curr_token.value.len; i++)
+      {
+        u8 c      = p->curr_token.value.buf[i];
+        char *fmt = c >= 32 && c <= 126 ? "Illegal token: %c" : "Illegal unprintable token: \\x%X";
+        parse_error(p, MessageLevel_Error, fmt, c);
+      }
+      break;
+    }
+    case TokenKind_EOF: assert(!"EOF tokens are checked by outer loop condition."); break;
+    default: assert(!"Tokenizer produced invalid token."); break;
+  }
+
+  return stmt;
+}
+
+// TODO(tad):
+// Consider no branching expectation checks with result type, only breaking before allocating
+// and initializing the statement. This might not be doable.
+//
+// Also consider usable sentinel types instead of null references. Could be useful for branchless
+// expectation checks, but more generally as well.
 internal Parser
 parse(Str8 input)
 {
@@ -989,124 +1213,9 @@ parse(Str8 input)
   AstStmt sentinel = { 0 };
   AstStmt *tail    = &sentinel;
 
-  // TODO(tad): Consider no branching expectation checks with result type, only breaking before
-  // allocating and initializing the statement.
-
   while (p.curr_token.kind != TokenKind_EOF)
   {
-    AstStmt *stmt = 0;
-
-    switch (p.curr_token.kind)
-    {
-      case TokenKind_Let:
-      {
-        Token let_token   = p.curr_token;
-        Token ident_token = p.peek_token;
-        if (!parse_expect(&p, TokenKind_Identifier)) break;
-        if (!parse_expect(&p, TokenKind_Assign)) break;
-
-        // TODO(tad): parse expressions
-        while (p.curr_token.kind != TokenKind_Semicolon)
-        {
-          parse_advance_token(&p);
-        }
-
-        stmt                          = arena_push_t(p.arena, AstStmt);
-        AstExprIdentifier *identifier = arena_push_t(p.arena, AstExprIdentifier);
-        // AstExpr *expr                 = arena_push_t(p.arena, AstExpr);
-
-        identifier->token = ident_token;
-
-        *stmt = (AstStmt){
-          .tag = AstStmt_Let,
-          .data.let = {
-            .token = let_token,
-            .identifier = identifier,
-            // .expression = expr,
-          },
-        };
-
-        break;
-      }
-
-      case TokenKind_Return:
-      {
-        Token ret_token = p.curr_token;
-
-        // TODO(tad): parse expressions
-        while (p.curr_token.kind != TokenKind_Semicolon)
-        {
-          parse_advance_token(&p);
-        }
-
-        stmt = arena_push_t(p.arena, AstStmt);
-        // AstExpr *expr                 = arena_push_t(p.arena, AstExpr);
-
-        *stmt = (AstStmt){
-          .tag = AstStmt_Ret,
-          .data.let = {
-            .token = ret_token,
-            // .expression = expr,
-          },
-        };
-        break;
-      }
-
-      // TODO(tad): some kinds are not appropriate here (e.g., semicolon)
-      case TokenKind_Identifier:
-      case TokenKind_Number:
-      case TokenKind_Assign:
-      case TokenKind_Plus:
-      case TokenKind_Minus:
-      case TokenKind_Bang:
-      case TokenKind_Star:
-      case TokenKind_Slash:
-      case TokenKind_Less:
-      case TokenKind_Greater:
-      case TokenKind_Equal:
-      case TokenKind_NotEqual:
-      case TokenKind_Comma:
-      case TokenKind_Semicolon:
-      case TokenKind_LParen:
-      case TokenKind_RParen:
-      case TokenKind_LBrace:
-      case TokenKind_RBrace:
-      case TokenKind_LBracket:
-      case TokenKind_RBracket:
-      case TokenKind_Function:
-      case TokenKind_True:
-      case TokenKind_False:
-      case TokenKind_If:
-      case TokenKind_Else:
-      {
-        stmt                  = arena_push_t(p.arena, AstStmt);
-        stmt->tag             = AstStmt_Expr;
-        stmt->data.expr.token = p.curr_token;
-        stmt->data.expr.expr  = parse_expr(&p, Precedence_Lowest);
-
-        if (p.peek_token.kind == TokenKind_Semicolon)
-        {
-          parse_advance_token(&p);
-        }
-
-        break;
-      }
-
-      case TokenKind_Illegal:
-      {
-        for (usize i = 0; i < p.curr_token.value.len; i++)
-        {
-          u8 c = p.curr_token.value.buf[i];
-          char *fmt = c >= 32 && c <= 126 ? "Illegal token: %c" : "Illegal unprintable token: \\x%X";
-          parse_error(&p, MessageLevel_Error, fmt, c);
-        }
-        break;
-      }
-
-      case TokenKind_EOF: assert(!"EOF tokens are checked by outer loop condition."); break;
-      default: assert(!"Tokenizer produced invalid token."); break;
-    }
-
+    AstStmt *stmt = parse_stmt(&p);
     if (stmt)
     {
       tail->next = stmt;
@@ -1190,7 +1299,7 @@ main(int argc, char *argv[])
   lex_print(input);
 
   Parser p            = parse(input);
-  Str8 parsed_program = parse_to_string(&p, true);
+  Str8 parsed_program = parse_to_string(&p);
   printf("\nParsed program:\n\n");
   printf("%.*s\n", str8_va(parsed_program));
   if (p.message_list.count > 0)
@@ -1747,6 +1856,72 @@ test_parse_expr_infix(void)
 }
 
 internal int
+test_parse_expr_if(void)
+{
+  Str8 input = str8_lit("if (x < y) { x }");
+
+  Parser p = parse(input);
+  test_helper(test_parse_check_messages(&p));
+
+  AstStmt *stmt = p.statements;
+  test_assert_m(stmt->next == 0, "expected one statement, parsed more");
+  test_assert_m(stmt->tag == AstStmt_Expr, "expected expression statement");
+
+  AstExpr *expr = stmt->data.expr.expr;
+  test_assert_m(expr->tag == AstExpr_IfElse, "expected if/else expression");
+  test_helper(test_infix_lit_expr(expr->data.if_else.condition,
+                                  TokenKind_Less,
+                                  expected_lit(AstExpr_Identifier, Str8, str8_lit("x")),
+                                  expected_lit(AstExpr_Identifier, Str8, str8_lit("y"))));
+
+  test_assert_m(expr->data.if_else.consequence != 0, "expected consequence");
+  test_assert_m(expr->data.if_else.alternative == 0, "expected no alternative");
+
+  AstStmt *consequence = expr->data.if_else.consequence->statements;
+  test_assert_m(consequence->next == 0, "expected one consequence statement, parsed more");
+  test_helper(test_literal_expr(consequence->data.expr.expr, AstExpr_Identifier, &str8_lit("x")));
+
+  parse_free(&p);
+
+  return 0;
+}
+
+internal int
+test_parse_expr_if_else(void)
+{
+  Str8 input = str8_lit("if (x < y) { x } else { y }");
+
+  Parser p = parse(input);
+  test_helper(test_parse_check_messages(&p));
+
+  AstStmt *stmt = p.statements;
+  test_assert_m(stmt->next == 0, "expected one statement, parsed more");
+  test_assert_m(stmt->tag == AstStmt_Expr, "expected expression statement");
+
+  AstExpr *expr = stmt->data.expr.expr;
+  test_assert_m(expr->tag == AstExpr_IfElse, "expected if/else expression");
+  test_helper(test_infix_lit_expr(expr->data.if_else.condition,
+                                  TokenKind_Less,
+                                  expected_lit(AstExpr_Identifier, Str8, str8_lit("x")),
+                                  expected_lit(AstExpr_Identifier, Str8, str8_lit("y"))));
+
+  test_assert_m(expr->data.if_else.consequence != 0, "expected consequence");
+  test_assert_m(expr->data.if_else.alternative != 0, "expected alternative");
+
+  AstStmt *consequence = expr->data.if_else.consequence->statements;
+  test_assert_m(consequence->next == 0, "expected one consequence statement, parsed more");
+  test_helper(test_literal_expr(consequence->data.expr.expr, AstExpr_Identifier, &str8_lit("x")));
+
+  AstStmt *alternative = expr->data.if_else.alternative->statements;
+  test_assert_m(alternative->next == 0, "expected one alternative statement, parsed more");
+  test_helper(test_literal_expr(alternative->data.expr.expr, AstExpr_Identifier, &str8_lit("y")));
+
+  parse_free(&p);
+
+  return 0;
+}
+
+internal int
 test_parse_op_precedence(void)
 {
   struct
@@ -1818,6 +1993,26 @@ test_parse_op_precedence(void)
       str8_lit("3 < 5 == true"),
       str8_lit("((3 < 5) == true)"),
     },
+    {
+      str8_lit("1 + (2 + 3) + 4"),
+      str8_lit("((1 + (2 + 3)) + 4)"),
+    },
+    {
+      str8_lit("(5 + 5) * 2"),
+      str8_lit("((5 + 5) * 2)"),
+    },
+    {
+      str8_lit("2 / (5 + 5)"),
+      str8_lit("(2 / (5 + 5))"),
+    },
+    {
+      str8_lit("-(5 + 5)"),
+      str8_lit("(-(5 + 5))"),
+    },
+    {
+      str8_lit("!(true == true)"),
+      str8_lit("(!(true == true))"),
+    },
   };
 
   for (usize i = 0; i < arr_count(tests); i++)
@@ -1825,7 +2020,7 @@ test_parse_op_precedence(void)
     Parser p = parse(tests[i].input);
     test_helper(test_parse_check_messages(&p));
 
-    Str8 actual = parse_to_string(&p, false);
+    Str8 actual = parse_to_string(&p);
 
     test_assert_m(str8_equal(tests[i].expected, actual),
                   "expected precedence of '%.*s', parsed '%.*s'",
@@ -1844,6 +2039,7 @@ test(void)
 {
   int result = 0;
 
+  // TODO(tad): ensure we're asserting before accessing fields of null ref in tests
   result += test_lex();
 
   result += test_parse_stmt_let();
@@ -1854,6 +2050,8 @@ test(void)
   result += test_parse_expr_number();
   result += test_parse_expr_prefix();
   result += test_parse_expr_infix();
+  result += test_parse_expr_if();
+  result += test_parse_expr_if_else();
 
   result += test_parse_op_precedence();
 
