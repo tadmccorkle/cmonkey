@@ -135,14 +135,6 @@ str8_append(StrBuilder8 *builder, Str8 value)
 
 #define str8_append_lit(builder, value) str8_append((builder), str8_lit((value)))
 
-internal void
-str8_append_char(StrBuilder8 *builder, u8 value)
-{
-  str8_ensure_capacity(builder, builder->len + 1);
-  builder->buf[builder->len] = value;
-  builder->len += 1;
-}
-
 // NOTE(tad): Return value allocated with `malloc` and must be freed.
 internal Str8
 str8_build(StrBuilder8 *builder)
@@ -154,6 +146,9 @@ str8_build(StrBuilder8 *builder)
 
 ////////////////////////////////////////////////////////////////////////////////
 // arena
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-function"
 
 #define ARENA_DEFAULT_SIZE MiB(2)
 
@@ -274,6 +269,8 @@ arena_tmp_end(TmpArena tmp)
   arena->current->pos = tmp.pos;
 }
 
+#pragma clang diagnostic pop
+
 ////////////////////////////////////////////////////////////////////////////////
 // lex
 
@@ -281,19 +278,6 @@ internal b32
 is_whitespace(u8 ch)
 {
   return ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n' || ch == '\v' || ch == '\f';
-}
-
-internal b32
-all_whitespace(Str8 str)
-{
-  for (usize i = 0; i < str.len; i++)
-  {
-    if (!is_whitespace(str.buf[i]))
-    {
-      return 0;
-    }
-  }
-  return 1;
 }
 
 internal b32
