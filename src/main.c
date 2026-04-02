@@ -1447,6 +1447,7 @@ test_lex(void)
 internal int
 test_identifier_expr(AstExpr *expr, Str8 expected)
 {
+  test_assert_m(expr != 0, "expected identifier expression is null");
   test_assert_m(expr->tag == AstExpr_Identifier, "expected identifier expression");
 
   Str8 actual = expr->data.identifier.token.value;
@@ -1461,6 +1462,7 @@ test_identifier_expr(AstExpr *expr, Str8 expected)
 internal int
 test_number_expr(AstExpr *expr, s64 expected)
 {
+  test_assert_m(expr != 0, "expected number expression is null");
   test_assert_m(expr->tag == AstExpr_Number, "expected number expression");
 
   s64 actual = expr->data.number.value;
@@ -1472,6 +1474,7 @@ test_number_expr(AstExpr *expr, s64 expected)
 internal int
 test_boolean_expr(AstExpr *expr, b8 expected)
 {
+  test_assert_m(expr != 0, "expected boolean expression is null");
   test_assert_m(expr->tag == AstExpr_Boolean, "expected boolean expression");
 
   b8 actual = expr->data.boolean.value;
@@ -1511,6 +1514,7 @@ struct ExpectedLitExpr
 internal int
 test_prefix_lit_expr(AstExpr *expr, TokenKind expected_op, ExpectedLitExpr expected_rhs)
 {
+  test_assert_m(expr != 0, "expected prefix expression is null");
   test_assert_m(expr->tag == AstExpr_Prefix, "expected prefix expression");
   test_assert_m(expr->data.prefix.token.kind == expected_op,
                 "expected '%.*s' infix expression, parsed '%.*s'",
@@ -1527,6 +1531,7 @@ test_infix_lit_expr(AstExpr *expr,
                     ExpectedLitExpr expected_lhs,
                     ExpectedLitExpr expected_rhs)
 {
+  test_assert_m(expr != 0, "expected infix expression is null");
   test_assert_m(expr->tag == AstExpr_Infix, "expected infix expression");
   test_assert_m(expr->data.infix.token.kind == expected_op,
                 "expected '%.*s' infix expression, parsed '%.*s'",
@@ -1703,6 +1708,7 @@ test_parse_expr_prefix(void)
     test_helper(test_parse_check_messages(&p));
 
     AstStmt *stmt = p.statements;
+    test_assert_m(stmt != 0, "expected prefix statement is null");
     test_assert_m(stmt->next == 0, "expected one statement, parsed more");
     test_assert_m(stmt->tag == AstStmt_Expr, "expected expression statement");
     test_helper(test_prefix_lit_expr(stmt->data.expr.expr, tests[i].op, tests[i].expected));
@@ -1845,6 +1851,7 @@ test_parse_expr_infix(void)
     test_helper(test_parse_check_messages(&p));
 
     AstStmt *stmt = p.statements;
+    test_assert_m(stmt != 0, "expected infix statement is null");
     test_assert_m(stmt->next == 0, "expected one statement, parsed more");
     test_assert_m(stmt->tag == AstStmt_Expr, "expected expression statement");
     test_helper(test_infix_lit_expr(stmt->data.expr.expr, tests[i].op, tests[i].lhs, tests[i].rhs));
@@ -1864,11 +1871,13 @@ test_parse_expr_if(void)
   test_helper(test_parse_check_messages(&p));
 
   AstStmt *stmt = p.statements;
+  test_assert_m(stmt != 0, "expected if-else statement is null");
   test_assert_m(stmt->next == 0, "expected one statement, parsed more");
   test_assert_m(stmt->tag == AstStmt_Expr, "expected expression statement");
 
   AstExpr *expr = stmt->data.expr.expr;
-  test_assert_m(expr->tag == AstExpr_IfElse, "expected if/else expression");
+  test_assert_m(expr != 0, "expected if-else expression is null");
+  test_assert_m(expr->tag == AstExpr_IfElse, "expected if-else expression");
   test_helper(test_infix_lit_expr(expr->data.if_else.condition,
                                   TokenKind_Less,
                                   expected_lit(AstExpr_Identifier, Str8, str8_lit("x")),
@@ -1878,6 +1887,7 @@ test_parse_expr_if(void)
   test_assert_m(expr->data.if_else.alternative == 0, "expected no alternative");
 
   AstStmt *consequence = expr->data.if_else.consequence->statements;
+  test_assert_m(consequence != 0, "expected one consequence statement, parsed none");
   test_assert_m(consequence->next == 0, "expected one consequence statement, parsed more");
   test_helper(test_literal_expr(consequence->data.expr.expr, AstExpr_Identifier, &str8_lit("x")));
 
@@ -1895,10 +1905,12 @@ test_parse_expr_if_else(void)
   test_helper(test_parse_check_messages(&p));
 
   AstStmt *stmt = p.statements;
+  test_assert_m(stmt != 0, "expected if-else statement is null");
   test_assert_m(stmt->next == 0, "expected one statement, parsed more");
   test_assert_m(stmt->tag == AstStmt_Expr, "expected expression statement");
 
   AstExpr *expr = stmt->data.expr.expr;
+  test_assert_m(expr != 0, "expected if-else expression is null");
   test_assert_m(expr->tag == AstExpr_IfElse, "expected if/else expression");
   test_helper(test_infix_lit_expr(expr->data.if_else.condition,
                                   TokenKind_Less,
@@ -1909,10 +1921,12 @@ test_parse_expr_if_else(void)
   test_assert_m(expr->data.if_else.alternative != 0, "expected alternative");
 
   AstStmt *consequence = expr->data.if_else.consequence->statements;
+  test_assert_m(consequence != 0, "expected one consequence statement, parsed none");
   test_assert_m(consequence->next == 0, "expected one consequence statement, parsed more");
   test_helper(test_literal_expr(consequence->data.expr.expr, AstExpr_Identifier, &str8_lit("x")));
 
   AstStmt *alternative = expr->data.if_else.alternative->statements;
+  test_assert_m(consequence != 0, "expected one alternative statement, parsed none");
   test_assert_m(alternative->next == 0, "expected one alternative statement, parsed more");
   test_helper(test_literal_expr(alternative->data.expr.expr, AstExpr_Identifier, &str8_lit("y")));
 
