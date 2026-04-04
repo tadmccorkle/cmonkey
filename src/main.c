@@ -1339,6 +1339,41 @@ main(int argc, char *argv[])
 }
 
 ////////////////////////////////////////////////////////////////////////////////
+// repl
+
+internal int
+repl(void)
+{
+  char const *PROMPT = ">> ";
+  char buffer[KiB(4)];
+  b32 print_prompt = true;
+
+  for (;;)
+  {
+    if (print_prompt) printf("%s", PROMPT);
+
+    if (fgets(buffer, sizeof(buffer), stdin) == NULL)
+    {
+      if (feof(stdin))
+      {
+        return 0;
+      }
+      else
+      {
+        perror("read input failed");
+        clearerr(stdin);
+        continue;
+      }
+    }
+
+    Str8 input = str8_from_cstr(buffer);
+    lex_print(input);
+
+    print_prompt = input.buf[input.len - 1] == '\n';
+  }
+}
+
+////////////////////////////////////////////////////////////////////////////////
 // test
 
 // TODO(tad): Printing is fine for this toy program, but it'd be more generally useful if these
@@ -2095,39 +2130,4 @@ test(void)
   result += test_parse_op_precedence();
 
   return result;
-}
-
-////////////////////////////////////////////////////////////////////////////////
-// repl
-
-internal int
-repl(void)
-{
-  char const *PROMPT = ">> ";
-  char buffer[KiB(4)];
-  b32 print_prompt = true;
-
-  for (;;)
-  {
-    if (print_prompt) printf("%s", PROMPT);
-
-    if (fgets(buffer, sizeof(buffer), stdin) == NULL)
-    {
-      if (feof(stdin))
-      {
-        return 0;
-      }
-      else
-      {
-        perror("read input failed");
-        clearerr(stdin);
-        continue;
-      }
-    }
-
-    Str8 input = str8_from_cstr(buffer);
-    lex_print(input);
-
-    print_prompt = input.buf[input.len - 1] == '\n';
-  }
 }
