@@ -106,21 +106,23 @@ struct StrBuilder8
 };
 
 internal StrBuilder8
-str8_init(usize capacity)
+str8_build_init(usize capacity)
 {
   StrBuilder8 builder = { .cap = capacity };
-  builder.buf         = malloc(sizeof(*builder.buf) * builder.cap);
+  // TODO(tad): Check/handle failure or assert.
+  builder.buf = malloc(sizeof(*builder.buf) * builder.cap);
   return builder;
 }
 
 internal void
-str8_ensure_capacity(StrBuilder8 *builder, usize required)
+str8_build_ensure_capacity(StrBuilder8 *builder, usize required)
 {
   if (builder->cap < required)
   {
     usize new_size = max(2 * sizeof(*builder->buf) * builder->cap, required);
-    builder->buf   = realloc(builder->buf, required);
-    builder->cap   = new_size;
+    // TODO(tad): Check/handle failure or assert.
+    builder->buf = realloc(builder->buf, new_size);
+    builder->cap = new_size;
   }
 }
 
@@ -128,18 +130,19 @@ internal void
 str8_append(StrBuilder8 *builder, Str8 value)
 {
   usize required_size = builder->len + value.len;
-  str8_ensure_capacity(builder, required_size);
+  str8_build_ensure_capacity(builder, required_size);
   memcpy(builder->buf + builder->len, value.buf, value.len);
   builder->len += value.len;
 }
 
-#define str8_append_lit(builder, value) str8_append((builder), str8_lit((value)))
+#define str8_append_lit(builder, value) str8_append((builder), str8_lit(value))
 
-// NOTE(tad): Return value allocated with `malloc` and must be freed.
+// TODO(tad): Return value allocated with `malloc` and must be freed. API could be expanded to work
+// with arenas/arbitrary buffers and/or copying results to another buffer and freeing the builder.
 internal Str8
 str8_build(StrBuilder8 *builder)
 {
-  str8_ensure_capacity(builder, builder->len + 1);
+  str8_build_ensure_capacity(builder, builder->len + 1);
   builder->buf[builder->len] = 0;
   return str8(builder->buf, builder->len);
 }
@@ -167,8 +170,8 @@ struct Arena
   ArenaBlock *current;
 };
 
-typedef struct TempArena TmpArena;
-struct TempArena
+typedef struct TmpArena TmpArena;
+struct TmpArena
 {
   Arena *arena;
   ArenaBlock *block;
@@ -178,6 +181,7 @@ struct TempArena
 internal ArenaBlock *
 arena_block_alloc(usize size)
 {
+  // TODO(tad): Check/handle failure or assert.
   ArenaBlock *block = malloc(sizeof(ArenaBlock) + size);
   block->prev       = 0;
   block->size       = size;
@@ -188,6 +192,7 @@ arena_block_alloc(usize size)
 internal Arena *
 arena_alloc(usize size)
 {
+  // TODO(tad): Check/handle failure or assert.
   Arena *arena   = malloc(sizeof(Arena));
   arena->current = arena_block_alloc(size);
   return arena;
@@ -204,7 +209,7 @@ arena_push(Arena *arena, usize size, usize align)
     usize new_size = block->size * 2;
     if (size > new_size)
     {
-      new_size = size + align;
+      new_size = size;
     }
 
     ArenaBlock *new_block = arena_block_alloc(new_size);
@@ -220,7 +225,38 @@ arena_push(Arena *arena, usize size, usize align)
   return result;
 }
 
-#define arena_push_t(arena, T) (T *)arena_push(arena, sizeof(T), _Alignof(T));
+internal void *
+arena_realloc(Arena *arena, void *ptr, usize old_size, usize new_size, usize align)
+{
+  ArenaBlock *block = arena->current;
+
+  if ((u8 *)ptr + old_size == block->data + block->pos)
+  {
+    if (new_size <= old_size)
+    {
+      block->pos -= old_size - new_size;
+      return ptr;
+    }
+
+    usize required = new_size - old_size;
+    if (block->pos + required <= block->size)
+    {
+      memset((u8 *)ptr + old_size, 0, required);
+      block->pos += required;
+      return ptr;
+    }
+  }
+
+  void *result = arena_push(arena, new_size, align);
+  memcpy(result, ptr, min(old_size, new_size));
+  return result;
+}
+
+// TODO(tad): arena_push, etc. w/o zero mem
+#define arena_push_tn(arena, T, n) (T *)arena_push((arena), sizeof(T) * (n), _Alignof(T))
+#define arena_push_t(arena, T)     arena_push_tn((arena), T, 1)
+#define arena_realloc_t(arena, ptr, T, old_n, new_n) \
+  (T *)arena_realloc((arena), (ptr), sizeof(T) * (old_n), sizeof(T) * (new_n), _Alignof(T))
 
 internal void
 arena_free(Arena *arena)
@@ -252,6 +288,13 @@ arena_tmp_begin(Arena *arena)
   tmp.block = arena->current;
   tmp.pos   = arena->current->pos;
   return tmp;
+}
+
+internal void
+arena_tmp_commit(TmpArena *tmp)
+{
+  tmp->block = tmp->arena->current;
+  tmp->pos   = tmp->arena->current->pos;
 }
 
 internal void
@@ -790,7 +833,7 @@ parse_build_stmt_string(StrBuilder8 *b, AstStmt *statements)
 internal Str8
 parse_to_string(Parser *p)
 {
-  StrBuilder8 b = str8_init(KiB(1));
+  StrBuilder8 b = str8_build_init(KiB(1));
   parse_build_stmt_string(&b, p->statements);
 
   return str8_build(&b);
@@ -818,9 +861,7 @@ parse_error(Parser *p, MessageLevel level, char const *fmt, ...)
     va_list args2;
     va_start(args1, fmt);
     va_copy(args2, args1);
-    len = vsnprintf(0, 0, fmt, args1);
-    // TODO(tad): arena_push_t w/ count
-    // TODO(tad): arena_push and etc. w/o zero mem
+    len      = vsnprintf(0, 0, fmt, args1);
     buf      = arena_push(p->arena, len + 1, _Alignof(u8));
     len      = vsnprintf(buf, len + 1, fmt, args2);
     buf[len] = 0;
@@ -1304,8 +1345,8 @@ main(int argc, char *argv[])
 // assertion macros collected failure messages for general use. This would also make it easier
 // to build failure stack traces (currently handled by printing).
 
-#define test_fail(fmt, ...) test_assert_m(false, fmt, ##__VA_ARGS__);
-#define test_assert(test)   test_assert_m(test, "test error");
+#define test_fail(fmt, ...) test_assert_m(false, fmt, ##__VA_ARGS__)
+#define test_assert(test)   test_assert_m(test, "test error")
 #define test_assert_m(test, fmt, ...)                                                           \
   do                                                                                            \
   {                                                                                             \
@@ -1318,7 +1359,7 @@ main(int argc, char *argv[])
 #define test_helper(help)                                          \
   do                                                               \
   {                                                                \
-    if ((help))                                                    \
+    if (help)                                                      \
     {                                                              \
       printf("\033[0;31m-> (%s:%d)\033[0m\n", __func__, __LINE__); \
       return 1;                                                    \
@@ -1489,10 +1530,10 @@ struct ExpectedLitExpr
   void *value;
 };
 
-#define expected_lit(kind_, type_, value_)                 \
-  (ExpectedLitExpr)                                        \
-  {                                                        \
-    .kind = (kind_), .value = &((type_[]){ (value_) })[0], \
+#define expected_lit(kind_, T, value_)                 \
+  (ExpectedLitExpr)                                    \
+  {                                                    \
+    .kind = (kind_), .value = &((T[]){ (value_) })[0], \
   }
 
 internal int
