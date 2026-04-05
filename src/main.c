@@ -10,7 +10,7 @@
 #include <string.h>
 
 ////////////////////////////////////////////////////////////////////////////////
-// base
+// std
 
 #define internal      static
 #define global        static
@@ -60,93 +60,6 @@ typedef b8 bool;
 #  include <stdbool.h>
 #endif
 
-internal usize
-cstr_length(char const *c)
-{
-  char const *p = c;
-  for (; *p != 0; p++);
-  return (p - c);
-}
-
-typedef struct Str8 Str8;
-struct Str8
-{
-  u8 const *buf;
-  usize len;
-};
-
-#define str8_lit(S) (Str8){ (u8 *)(S), sizeof(S) - 1 }
-#define str8_cti(S) { (u8 *)(S), sizeof(S) - 1 }
-#define str8_va(S)  (int)(S).len, (S).buf
-
-internal Str8
-str8(u8 const *value, usize length)
-{
-  return (Str8){ value, length };
-}
-
-internal Str8
-str8_from_cstr(char const *c)
-{
-  return str8((u8 *)c, cstr_length(c));
-}
-
-internal b32
-str8_equal(Str8 a, Str8 b)
-{
-  return a.len == b.len && memcmp(a.buf, b.buf, a.len) == 0;
-}
-
-typedef struct StrBuilder8 StrBuilder8;
-struct StrBuilder8
-{
-  u8 *buf;
-  usize len;
-  usize cap;
-};
-
-internal StrBuilder8
-str8_build_init(usize capacity)
-{
-  StrBuilder8 builder = { .cap = capacity };
-  // TODO(tad): Check/handle failure or assert.
-  builder.buf = malloc(sizeof(*builder.buf) * builder.cap);
-  return builder;
-}
-
-internal void
-str8_build_ensure_capacity(StrBuilder8 *builder, usize required)
-{
-  if (builder->cap < required)
-  {
-    usize new_size = max(2 * sizeof(*builder->buf) * builder->cap, required);
-    // TODO(tad): Check/handle failure or assert.
-    builder->buf = realloc(builder->buf, new_size);
-    builder->cap = new_size;
-  }
-}
-
-internal void
-str8_append(StrBuilder8 *builder, Str8 value)
-{
-  usize required_size = builder->len + value.len;
-  str8_build_ensure_capacity(builder, required_size);
-  memcpy(builder->buf + builder->len, value.buf, value.len);
-  builder->len += value.len;
-}
-
-#define str8_append_lit(builder, value) str8_append((builder), str8_lit(value))
-
-// TODO(tad): Return value allocated with `malloc` and must be freed. API could be expanded to work
-// with arenas/arbitrary buffers and/or copying results to another buffer and freeing the builder.
-internal Str8
-str8_build(StrBuilder8 *builder)
-{
-  str8_build_ensure_capacity(builder, builder->len + 1);
-  builder->buf[builder->len] = 0;
-  return str8(builder->buf, builder->len);
-}
-
 ////////////////////////////////////////////////////////////////////////////////
 // arena
 
@@ -154,6 +67,12 @@ str8_build(StrBuilder8 *builder)
 #pragma clang diagnostic ignored "-Wunused-function"
 
 #define ARENA_DEFAULT_SIZE MiB(2)
+
+typedef enum
+{
+  ArenaOpt_None   = 0,
+  ArenaOpt_NoZero = 1 << 0,
+} ArenaOpt;
 
 typedef struct ArenaBlock ArenaBlock;
 struct ArenaBlock
@@ -179,7 +98,7 @@ struct TmpArena
 };
 
 internal ArenaBlock *
-arena_block_alloc(usize size)
+arena_block_create(usize size)
 {
   // TODO(tad): Check/handle failure or assert.
   ArenaBlock *block = malloc(sizeof(ArenaBlock) + size);
@@ -190,16 +109,16 @@ arena_block_alloc(usize size)
 }
 
 internal Arena *
-arena_alloc(usize size)
+arena_create(usize size)
 {
   // TODO(tad): Check/handle failure or assert.
   Arena *arena   = malloc(sizeof(Arena));
-  arena->current = arena_block_alloc(size);
+  arena->current = arena_block_create(size);
   return arena;
 }
 
 internal void *
-arena_push(Arena *arena, usize size, usize align)
+arena_alloc(Arena *arena, usize size, usize align, ArenaOpt opts)
 {
   ArenaBlock *block = arena->current;
   usize pos         = align_up(block->pos, align);
@@ -212,7 +131,7 @@ arena_push(Arena *arena, usize size, usize align)
       new_size = size;
     }
 
-    ArenaBlock *new_block = arena_block_alloc(new_size);
+    ArenaBlock *new_block = arena_block_create(new_size);
     new_block->prev       = block;
     arena->current        = new_block;
     block                 = new_block;
@@ -221,13 +140,20 @@ arena_push(Arena *arena, usize size, usize align)
 
   void *result = block->data + pos;
   block->pos   = pos + size;
-  memset(result, 0, size);
+
+  if (!(opts & ArenaOpt_NoZero))
+  {
+    memset(result, 0, size);
+  }
+
   return result;
 }
 
 internal void *
-arena_realloc(Arena *arena, void *ptr, usize old_size, usize new_size, usize align)
+arena_realloc(Arena *arena, void *ptr, usize old_size, usize new_size, usize align, ArenaOpt opts)
 {
+  if (ptr == 0 || old_size == 0) return arena_alloc(arena, new_size, align, opts);
+
   ArenaBlock *block = arena->current;
 
   if ((u8 *)ptr + old_size == block->data + block->pos)
@@ -241,22 +167,32 @@ arena_realloc(Arena *arena, void *ptr, usize old_size, usize new_size, usize ali
     usize required = new_size - old_size;
     if (block->pos + required <= block->size)
     {
-      memset((u8 *)ptr + old_size, 0, required);
+      if (!(opts & ArenaOpt_NoZero))
+      {
+        memset((u8 *)ptr + old_size, 0, required);
+      }
       block->pos += required;
       return ptr;
     }
   }
 
-  void *result = arena_push(arena, new_size, align);
+  void *result = arena_alloc(arena, new_size, align, opts);
   memcpy(result, ptr, min(old_size, new_size));
   return result;
 }
 
-// TODO(tad): arena_push, etc. w/o zero mem
-#define arena_push_tn(arena, T, n) (T *)arena_push((arena), sizeof(T) * (n), _Alignof(T))
-#define arena_push_t(arena, T)     arena_push_tn((arena), T, 1)
+#define arena_alloc_tn(arena, T, n) \
+  (T *)arena_alloc((arena), sizeof(T) * (n), _Alignof(T), ArenaOpt_None)
+#define arena_alloc_tn_nz(arena, T, n) \
+  (T *)arena_alloc((arena), sizeof(T) * (n), _Alignof(T), ArenaOpt_NoZero)
+
+#define arena_alloc_t(arena, T)    arena_alloc_tn((arena), T, 1)
+#define arena_alloc_t_nz(arena, T) arena_alloc_tn_nz((arena), T, 1)
+
 #define arena_realloc_t(arena, ptr, T, old_n, new_n) \
-  (T *)arena_realloc((arena), (ptr), sizeof(T) * (old_n), sizeof(T) * (new_n), _Alignof(T))
+  (T *)arena_realloc((arena), (ptr), sizeof(T) * (old_n), sizeof(T) * (new_n), _Alignof(T), ArenaOpt_None)
+#define arena_realloc_t_nz(arena, ptr, T, old_n, new_n) \
+  (T *)arena_realloc((arena), (ptr), sizeof(T) * (old_n), sizeof(T) * (new_n), _Alignof(T), ArenaOpt_NoZero)
 
 internal void
 arena_free(Arena *arena)
@@ -276,7 +212,7 @@ internal per_thread Arena *tl_arena;
 internal Arena *
 arena_tl_get(void)
 {
-  if (!tl_arena) tl_arena = arena_alloc(ARENA_DEFAULT_SIZE);
+  if (!tl_arena) tl_arena = arena_create(ARENA_DEFAULT_SIZE);
   return tl_arena;
 }
 
@@ -310,6 +246,167 @@ arena_tmp_end(TmpArena tmp)
   }
 
   arena->current->pos = tmp.pos;
+}
+
+#pragma clang diagnostic pop
+
+////////////////////////////////////////////////////////////////////////////////
+// strings
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-function"
+
+internal usize
+cstr_length(char const *c)
+{
+  char const *p = c;
+  for (; *p != 0; p++);
+  return (p - c);
+}
+
+typedef struct Str8 Str8;
+struct Str8
+{
+  u8 const *buf;
+  usize len;
+};
+
+#define str8_lit(S) (Str8){ (u8 *)(S), sizeof(S) - 1 }
+#define str8_cti(S) { (u8 *)(S), sizeof(S) - 1 }
+#define str8_va(S)  (int)(S).len, (S).buf
+
+internal Str8
+str8(u8 const *value, usize length)
+{
+  return (Str8){ value, length };
+}
+
+internal Str8
+str8_fv(Arena *arena, char const *fmt, va_list args)
+{
+  va_list args2;
+  va_copy(args2, args);
+  usize len = vsnprintf(0, 0, fmt, args);
+  char *buf = arena_alloc_tn_nz(arena, char, len + 1);
+  vsnprintf(buf, len + 1, fmt, args2);
+  buf[len] = 0;
+  va_end(args2);
+  return str8((u8 *)buf, len);
+}
+
+internal Str8
+str8_f(Arena *arena, char const *fmt, ...)
+{
+  va_list args;
+  va_start(args, fmt);
+  Str8 result = str8_fv(arena, fmt, args);
+  va_end(args);
+  return result;
+}
+
+internal Str8
+str8_from_cstr(char const *c)
+{
+  return str8((u8 *)c, cstr_length(c));
+}
+
+internal b32
+str8_equal(Str8 a, Str8 b)
+{
+  return a.len == b.len && memcmp(a.buf, b.buf, a.len) == 0;
+}
+
+#define STR8_BUILDER_DEFAULT_CAPACITY 256
+
+typedef struct StrBuilder8 StrBuilder8;
+struct StrBuilder8
+{
+  u8 *buf;
+  usize len;
+  usize cap;
+  Arena *arena;
+};
+
+internal StrBuilder8
+str8_builder_create(Arena *arena, usize capacity)
+{
+  StrBuilder8 builder = { .arena = arena, .cap = capacity };
+  builder.buf         = arena_alloc_tn(arena, u8, capacity);
+  return builder;
+}
+
+#define str8_builder_create_default(arena) \
+  str8_builder_create((arena), STR8_BUILDER_DEFAULT_CAPACITY);
+
+internal void
+str8_builder_reset(StrBuilder8 *builder)
+{
+  builder->len = 0;
+}
+
+internal void
+str8_ensure_capacity(StrBuilder8 *builder, usize required)
+{
+  if (builder->cap < required)
+  {
+    usize old_cap = builder->cap;
+    usize new_cap = max(2 * old_cap, required);
+    builder->buf  = arena_realloc_t(builder->arena, builder->buf, u8, builder->cap, new_cap);
+    builder->cap  = new_cap;
+  }
+}
+
+internal void
+str8_append(StrBuilder8 *builder, Str8 value)
+{
+  str8_ensure_capacity(builder, builder->len + value.len);
+  memcpy(builder->buf + builder->len, value.buf, value.len);
+  builder->len += value.len;
+}
+
+#define str8_append_lit(builder, value) str8_append((builder), str8_lit(value))
+
+internal void
+str8_append_fv(StrBuilder8 *builder, char const *fmt, va_list args)
+{
+  va_list args2;
+  va_copy(args2, args);
+  usize append_len = vsnprintf(0, 0, fmt, args);
+  str8_ensure_capacity(builder, builder->len + append_len);
+  vsnprintf((char *)builder->buf + builder->len, append_len + 1, fmt, args2);
+  builder->len += append_len;
+  va_end(args2);
+}
+
+internal void
+str8_append_f(StrBuilder8 *builder, char const *fmt, ...)
+{
+  va_list args;
+  va_start(args, fmt);
+  str8_append_fv(builder, fmt, args);
+  va_end(args);
+}
+
+internal Str8
+str8_build(StrBuilder8 *builder)
+{
+  str8_ensure_capacity(builder, builder->len + 1);
+  builder->buf[builder->len] = 0;
+
+  Str8 result = str8(builder->buf, builder->len);
+  *builder    = (StrBuilder8){ 0 };
+
+  return result;
+}
+
+internal Str8
+str8_build_to_arena(StrBuilder8 *builder, Arena *arena)
+{
+  u8 *buf = arena_alloc_tn_nz(arena, u8, builder->len + 1);
+  memcpy(buf, builder->buf, builder->len);
+  buf[builder->len] = 0;
+
+  return str8(buf, builder->len);
 }
 
 #pragma clang diagnostic pop
@@ -528,7 +625,7 @@ lex_advance_token(Lexer *l, Token *token)
         {
           Str8 keyword = keyword_tokens[i].value;
 
-          if (keyword.len > length) continue;
+          if (keyword.len != length) continue;
 
           if (!memcmp(keyword.buf, &l->input.buf[l->pos], keyword.len))
           {
@@ -605,6 +702,9 @@ typedef enum
   Precedence_Call,        // func()
   Precedence_COUNT
 } Precedence;
+
+// TODO(tad): Build expression and statement kinds with macro to support forward declarations,
+// pretty-printing, etc.
 
 typedef enum
 {
@@ -781,16 +881,16 @@ parse_build_expr_string(StrBuilder8 *b, AstExpr *expr)
       break;
 
     case AstExpr_IfElse:
-      str8_append_lit(b, "if ");
+      str8_append_lit(b, "if");
       parse_build_expr_string(b, expr->data.if_else.condition);
-      str8_append_lit(b, " {");
+      str8_append_lit(b, " { ");
       parse_build_stmt_string(b, expr->data.if_else.consequence->statements);
-      str8_append_lit(b, "}");
+      str8_append_lit(b, " } ");
       if (expr->data.if_else.alternative != 0)
       {
-        str8_append_lit(b, " else {");
+        str8_append_lit(b, " else { ");
         parse_build_stmt_string(b, expr->data.if_else.alternative->statements);
-        str8_append_lit(b, "}");
+        str8_append_lit(b, " }");
       }
       break;
 
@@ -829,11 +929,10 @@ parse_build_stmt_string(StrBuilder8 *b, AstStmt *statements)
 }
 
 // NOTE(tad): This is entirely for debugging/testing purposes and should not otherwise be used.
-// Uses `malloc`, so the return value must be freed manually.
 internal Str8
 parse_to_string(Parser *p)
 {
-  StrBuilder8 b = str8_build_init(KiB(1));
+  StrBuilder8 b = str8_builder_create(p->arena, KiB(1));
   parse_build_stmt_string(&b, p->statements);
 
   return str8_build(&b);
@@ -851,26 +950,13 @@ parse_print_messages(Parser *p)
 internal void
 parse_error(Parser *p, MessageLevel level, char const *fmt, ...)
 {
-  Message *m = arena_push_t(p->arena, Message);
+  Message *m = arena_alloc_t(p->arena, Message);
+  m->level   = level;
 
-  char *buf;
-  usize len;
-  // TODO(tad): dedicated str8_f and str8_fv functions
-  {
-    va_list args1;
-    va_list args2;
-    va_start(args1, fmt);
-    va_copy(args2, args1);
-    len      = vsnprintf(0, 0, fmt, args1);
-    buf      = arena_push(p->arena, len + 1, _Alignof(u8));
-    len      = vsnprintf(buf, len + 1, fmt, args2);
-    buf[len] = 0;
-    va_end(args2);
-    va_end(args1);
-  }
-
-  m->level = level;
-  m->value = str8((u8 *)buf, len);
+  va_list args;
+  va_start(args, fmt);
+  m->value = str8_fv(p->arena, fmt, args);
+  va_end(args);
 
   if (p->message_list.level < level)
   {
@@ -937,6 +1023,8 @@ parse_get_precedence(TokenKind kind)
   }
 }
 
+// TODO(tad): Refactor these to make use of new TmpArena commit function. Can rollback invalid
+// allocations instead of leaving in arena.
 internal AstStmt *parse_stmt(Parser *p);
 internal AstExpr *parse_expr(Parser *p, Precedence precedence);
 internal AstStmtBlock *parse_block(Parser *p);
@@ -944,7 +1032,7 @@ internal AstStmtBlock *parse_block(Parser *p);
 internal AstStmtBlock *
 parse_block(Parser *p)
 {
-  AstStmtBlock *block = arena_push_t(p->arena, AstStmtBlock);
+  AstStmtBlock *block = arena_alloc_t(p->arena, AstStmtBlock);
   block->token        = p->curr_token;
 
   parse_advance_token(p);
@@ -952,6 +1040,7 @@ parse_block(Parser *p)
   AstStmt sentinel = { 0 };
   AstStmt *tail    = &sentinel;
 
+  // TODO(tad): Error here if EOF is reached instead of RBrace?
   while (p->curr_token.kind != TokenKind_RBrace && p->curr_token.kind != TokenKind_EOF)
   {
     AstStmt *stmt = parse_stmt(p);
@@ -980,7 +1069,7 @@ parse_expr(Parser *p, Precedence precedence)
     {
       case TokenKind_Identifier:
       {
-        lhs                        = arena_push_t(p->arena, AstExpr);
+        lhs                        = arena_alloc_t(p->arena, AstExpr);
         lhs->tag                   = AstExpr_Identifier;
         lhs->data.identifier.token = p->curr_token;
         break;
@@ -988,10 +1077,10 @@ parse_expr(Parser *p, Precedence precedence)
 
       case TokenKind_Number:
       {
-        lhs                    = arena_push_t(p->arena, AstExpr);
+        lhs                    = arena_alloc_t(p->arena, AstExpr);
         lhs->tag               = AstExpr_Number;
         lhs->data.number.token = p->curr_token;
-        // TODO(tad): handle error here
+        // TODO(tad): handle error here, could use tmp buf to ensure null termination
         lhs->data.number.value = strtoll((char *)p->curr_token.value.buf, 0, 10);
         break;
       }
@@ -999,7 +1088,7 @@ parse_expr(Parser *p, Precedence precedence)
       case TokenKind_True:
       case TokenKind_False:
       {
-        lhs                     = arena_push_t(p->arena, AstExpr);
+        lhs                     = arena_alloc_t(p->arena, AstExpr);
         lhs->tag                = AstExpr_Boolean;
         lhs->data.boolean.token = p->curr_token;
         lhs->data.boolean.value = p->curr_token.kind == TokenKind_True;
@@ -1009,7 +1098,7 @@ parse_expr(Parser *p, Precedence precedence)
       case TokenKind_Minus:
       case TokenKind_Bang:
       {
-        lhs                    = arena_push_t(p->arena, AstExpr);
+        lhs                    = arena_alloc_t(p->arena, AstExpr);
         lhs->tag               = AstExpr_Prefix;
         lhs->data.prefix.token = p->curr_token;
         parse_advance_token(p);
@@ -1019,9 +1108,15 @@ parse_expr(Parser *p, Precedence precedence)
 
       case TokenKind_If:
       {
+        AstExpr *if_expr;
         Token if_token = p->curr_token;
 
         if (!parse_expect(p, TokenKind_LParen)) break;
+
+        if_expr = arena_alloc_t(p->arena, AstExpr);
+
+        // TODO(tad): Advance past parenthesis for more useful if expression error messages instead
+        // of relying on grouped expression parsing.
         AstExpr *condition = parse_expr(p, Precedence_Lowest);
         if (condition == 0) break;
 
@@ -1036,7 +1131,7 @@ parse_expr(Parser *p, Precedence precedence)
           alternative = parse_block(p);
         }
 
-        lhs                           = arena_push_t(p->arena, AstExpr);
+        lhs                           = if_expr;
         lhs->tag                      = AstExpr_IfElse;
         lhs->data.if_else.token       = if_token;
         lhs->data.if_else.condition   = condition;
@@ -1091,7 +1186,7 @@ parse_expr(Parser *p, Precedence precedence)
       {
         parse_advance_token(p);
 
-        AstExpr *infix          = arena_push_t(p->arena, AstExpr);
+        AstExpr *infix          = arena_alloc_t(p->arena, AstExpr);
         infix->tag              = AstExpr_Infix;
         infix->data.infix.token = p->curr_token;
         infix->data.infix.lhs   = lhs;
@@ -1146,7 +1241,7 @@ parse_stmt(Parser *p)
     case TokenKind_If:
     case TokenKind_Else:
     {
-      stmt                  = arena_push_t(p->arena, AstStmt);
+      stmt                  = arena_alloc_t(p->arena, AstStmt);
       stmt->tag             = AstStmt_Expr;
       stmt->data.expr.token = p->curr_token;
       stmt->data.expr.expr  = parse_expr(p, Precedence_Lowest);
@@ -1172,9 +1267,9 @@ parse_stmt(Parser *p)
         parse_advance_token(p);
       }
 
-      stmt                          = arena_push_t(p->arena, AstStmt);
-      AstExprIdentifier *identifier = arena_push_t(p->arena, AstExprIdentifier);
-      // AstExpr *expr                 = arena_push_t(p.arena, AstExpr);
+      stmt                          = arena_alloc_t(p->arena, AstStmt);
+      AstExprIdentifier *identifier = arena_alloc_t(p->arena, AstExprIdentifier);
+      // AstExpr *expr                 = arena_alloc_t(p.arena, AstExpr);
 
       identifier->token = ident_token;
 
@@ -1195,8 +1290,8 @@ parse_stmt(Parser *p)
         parse_advance_token(p);
       }
 
-      stmt = arena_push_t(p->arena, AstStmt);
-        // AstExpr *expr                 = arena_push_t(p.arena, AstExpr);
+      stmt = arena_alloc_t(p->arena, AstStmt);
+      // AstExpr *expr                 = arena_alloc_t(p.arena, AstExpr);
 
       stmt->tag            = AstStmt_Ret;
       stmt->data.ret.token = ret_token;
@@ -1233,7 +1328,7 @@ internal Parser
 parse(Str8 input)
 {
   Parser p = { 0 };
-  parse_init(&p, input, arena_alloc(KiB(4)));
+  parse_init(&p, input, arena_create(KiB(4)));
 
   AstStmt sentinel = { 0 };
   AstStmt *tail    = &sentinel;
@@ -1332,7 +1427,6 @@ main(int argc, char *argv[])
     printf("\n---------------\n\n");
     parse_print_messages(&p);
   }
-  free((void *)parsed_program.buf);
   parse_free(&p);
 
   return 0;
@@ -2101,7 +2195,6 @@ test_parse_op_precedence(void)
                   str8_va(tests[i].expected),
                   str8_va(actual));
 
-    free((void *)actual.buf);
     parse_free(&p);
   }
 
