@@ -336,7 +336,7 @@ str8_builder_create(Arena *arena, usize capacity)
 }
 
 #define str8_builder_create_default(arena) \
-  str8_builder_create((arena), STR8_BUILDER_DEFAULT_CAPACITY);
+  str8_builder_create((arena), STR8_BUILDER_DEFAULT_CAPACITY)
 
 internal void
 str8_builder_reset(StrBuilder8 *builder)
@@ -897,9 +897,9 @@ parse_build_expr_string(StrBuilder8 *b, AstExpr *expr)
       break;
 
     case AstExpr_IfElse:
-      str8_append_lit(b, "if");
+      str8_append_lit(b, "if(");
       parse_build_expr_string(b, expr->data.if_else.condition);
-      str8_append_lit(b, "{ ");
+      str8_append_lit(b, "){ ");
       parse_build_stmt_string(b, expr->data.if_else.consequence->statements);
       str8_append_lit(b, " }");
       if (expr->data.if_else.alternative != 0)
@@ -911,7 +911,7 @@ parse_build_expr_string(StrBuilder8 *b, AstExpr *expr)
       break;
 
     case AstExpr_Function:
-      str8_append_lit(b, "fn (");
+      str8_append_lit(b, "fn(");
       if (expr->data.function.params != 0)
       {
         for (AstExprFunctionParam *param = expr->data.function.params;; param = param->next)
@@ -921,7 +921,7 @@ parse_build_expr_string(StrBuilder8 *b, AstExpr *expr)
           str8_append_lit(b, ",");
         }
       }
-      str8_append_lit(b, ") { ");
+      str8_append_lit(b, "){ ");
       parse_build_stmt_string(b, expr->data.function.body->statements);
       str8_append_lit(b, " }");
       break;
@@ -1337,22 +1337,24 @@ parse_stmt(Parser *p)
       if (!parse_expect(p, TokenKind_Identifier)) break;
       if (!parse_expect(p, TokenKind_Assign)) break;
 
-      // TODO(tad): parse expressions
-      while (p->curr_token.kind != TokenKind_Semicolon)
-      {
-        parse_advance_token(p);
-      }
+      parse_advance_token(p);
 
       stmt                          = arena_alloc_t(p->arena, AstStmt);
       AstExprIdentifier *identifier = arena_alloc_t(p->arena, AstExprIdentifier);
-      // AstExpr *expr                 = arena_alloc_t(p.arena, AstExpr);
+      AstExpr *expr                 = parse_expr(p, Precedence_Lowest);
 
       identifier->token = ident_token;
 
       stmt->tag                 = AstStmt_Let;
       stmt->data.let.token      = let_token;
       stmt->data.let.identifier = identifier;
-      // stmt->data.let.expr = expr;
+      stmt->data.let.expr       = expr;
+
+      if (p->curr_token.kind != TokenKind_Semicolon)
+      {
+        parse_advance_token(p);
+      }
+
       break;
     }
 
@@ -1360,18 +1362,20 @@ parse_stmt(Parser *p)
     {
       Token ret_token = p->curr_token;
 
-      // TODO(tad): parse expressions
-      while (p->curr_token.kind != TokenKind_Semicolon)
+      parse_advance_token(p);
+
+      stmt          = arena_alloc_t(p->arena, AstStmt);
+      AstExpr *expr = parse_expr(p, Precedence_Lowest);
+
+      stmt->tag            = AstStmt_Ret;
+      stmt->data.ret.token = ret_token;
+      stmt->data.ret.expr  = expr;
+
+      if (p->curr_token.kind != TokenKind_Semicolon)
       {
         parse_advance_token(p);
       }
 
-      stmt = arena_alloc_t(p->arena, AstStmt);
-      // AstExpr *expr                 = arena_alloc_t(p.arena, AstExpr);
-
-      stmt->tag            = AstStmt_Ret;
-      stmt->data.ret.token = ret_token;
-      // stmt->data.ret.expr = expr;
       break;
     }
 
@@ -1741,6 +1745,8 @@ struct ExpectedLitExpr
     .kind = (kind_), .value = &((T[]){ (value_) })[0], \
   }
 
+#define test_lit_expr(expr, expected) test_literal_expr((expr), (expected).kind, (expected).value)
+
 internal int
 test_prefix_lit_expr(AstExpr *expr, TokenKind expected_op, ExpectedLitExpr expected_rhs)
 {
@@ -1785,31 +1791,34 @@ test_parse_check_messages(Parser *p)
 internal int
 test_parse_stmt_let(void)
 {
-  Str8 input = str8_lit("let x = 5; let y = 10;");
-
-  Str8 expected_identifiers[] = {
-    str8_lit("x"),
-    str8_lit("y"),
+  struct
+  {
+    Str8 input;
+    Str8 expected_identifier;
+    ExpectedLitExpr expected_expr;
+  } tests[] = {
+    { str8_lit("let x = 1;"), str8_lit("x"), expected_lit(AstExpr_Number, s64, 1) },
+    { str8_lit("let y = true;"), str8_lit("y"), expected_lit(AstExpr_Boolean, b8, true) },
+    { str8_lit("let z = y;"), str8_lit("z"), expected_lit(AstExpr_Identifier, Str8, str8_lit("y")) },
   };
 
-  Parser p = parse(input);
-  test_helper(test_parse_check_messages(&p));
-
-  usize i = 0;
-  for (AstStmt *stmt = p.statements; stmt != 0; stmt = stmt->next, i++)
+  for (usize i = 0; i < arr_count(tests); i++)
   {
+    Parser p = parse(tests[i].input);
+    test_helper(test_parse_check_messages(&p));
+
+    AstStmt *stmt = p.statements;
+    test_assert_m(stmt != 0, "expected let statement is null");
+    test_assert_m(stmt->next == 0, "expected one statement, parsed more");
     test_assert_m(stmt->tag == AstStmt_Let, "expected let statement");
-    test_assert_m(str8_equal(stmt->data.let.identifier->token.value, expected_identifiers[i]),
-                  "unexpected let statement identifier");
-    // TODO(tad): test expression
+    test_assert_m(str8_equal(stmt->data.let.identifier->token.value, tests[i].expected_identifier),
+                  "expected let identifier '%.*s', parsed '%.*s'",
+                  str8_va(tests[i].expected_identifier),
+                  str8_va(stmt->data.let.identifier->token.value));
+    test_helper(test_lit_expr(stmt->data.let.expr, tests[i].expected_expr));
+
+    parse_free(&p);
   }
-
-  test_assert_m(arr_count(expected_identifiers) == i,
-                "expected %zu statements, parsed %zu",
-                arr_count(expected_identifiers),
-                i);
-
-  parse_free(&p);
 
   return 0;
 }
@@ -1817,22 +1826,29 @@ test_parse_stmt_let(void)
 internal int
 test_parse_stmt_ret(void)
 {
-  Str8 input                = str8_lit("return 5; return 10;");
-  const u32 statement_count = 2;
-
-  Parser p = parse(input);
-  test_helper(test_parse_check_messages(&p));
-
-  usize i = 0;
-  for (AstStmt *stmt = p.statements; stmt != 0; stmt = stmt->next, i++)
+  struct
   {
+    Str8 input;
+    ExpectedLitExpr expected;
+  } tests[] = {
+    { str8_lit("return 1;"), expected_lit(AstExpr_Number, s64, 1) },
+    { str8_lit("return true;"), expected_lit(AstExpr_Boolean, b8, true) },
+    { str8_lit("return y;"), expected_lit(AstExpr_Identifier, Str8, str8_lit("y")) },
+  };
+
+  for (usize i = 0; i < arr_count(tests); i++)
+  {
+    Parser p = parse(tests[i].input);
+    test_helper(test_parse_check_messages(&p));
+
+    AstStmt *stmt = p.statements;
+    test_assert_m(stmt != 0, "expected return statement is null");
+    test_assert_m(stmt->next == 0, "expected one statement, parsed more");
     test_assert_m(stmt->tag == AstStmt_Ret, "expected return statement");
-    // TODO(tad): test expression
+    test_helper(test_lit_expr(stmt->data.ret.expr, tests[i].expected));
+
+    parse_free(&p);
   }
-
-  test_assert_m(statement_count == i, "expected %u statements, parsed %zu", statement_count, i);
-
-  parse_free(&p);
 
   return 0;
 }
@@ -1960,37 +1976,37 @@ test_parse_expr_infix(void)
     ExpectedLitExpr rhs;
   } tests[] = {
     {
-      str8_lit("5  + 4;"),
+      str8_lit("5 + 4;"),
       TokenKind_Plus,
       expected_lit(AstExpr_Number, s64, 5),
       expected_lit(AstExpr_Number, s64, 4),
     },
     {
-      str8_lit("6  - 5;"),
+      str8_lit("6 - 5;"),
       TokenKind_Minus,
       expected_lit(AstExpr_Number, s64, 6),
       expected_lit(AstExpr_Number, s64, 5),
     },
     {
-      str8_lit("7  * 6;"),
+      str8_lit("7 * 6;"),
       TokenKind_Star,
       expected_lit(AstExpr_Number, s64, 7),
       expected_lit(AstExpr_Number, s64, 6),
     },
     {
-      str8_lit("8  / 7;"),
+      str8_lit("8 / 7;"),
       TokenKind_Slash,
       expected_lit(AstExpr_Number, s64, 8),
       expected_lit(AstExpr_Number, s64, 7),
     },
     {
-      str8_lit("9  > 8;"),
+      str8_lit("9 > 8;"),
       TokenKind_Greater,
       expected_lit(AstExpr_Number, s64, 9),
       expected_lit(AstExpr_Number, s64, 8),
     },
     {
-      str8_lit("8  < 9;"),
+      str8_lit("8 < 9;"),
       TokenKind_Less,
       expected_lit(AstExpr_Number, s64, 8),
       expected_lit(AstExpr_Number, s64, 9),
@@ -2383,7 +2399,6 @@ test(void)
 {
   int result = 0;
 
-  // TODO(tad): ensure we're asserting before accessing fields of null ref in tests
   result += test_lex();
 
   result += test_parse_stmt_let();
