@@ -714,7 +714,7 @@ typedef enum
   AstExpr_Prefix,
   AstExpr_Infix,
   AstExpr_IfElse,
-  // ...
+  AstExpr_Function,
   AstExpr_COUNT,
 } AstExprKind;
 
@@ -772,6 +772,21 @@ struct AstExprIf
   AstStmtBlock *alternative;
 };
 
+typedef struct AstExprFunctionParam AstExprFunctionParam;
+struct AstExprFunctionParam
+{
+  AstExprFunctionParam *next;
+  AstExprIdentifier identifier;
+};
+
+typedef struct AstExprFunction AstExprFunction;
+struct AstExprFunction
+{
+  Token token;
+  AstExprFunctionParam *params;
+  AstStmtBlock *body;
+};
+
 struct AstExpr
 {
   AstExprKind tag;
@@ -783,6 +798,7 @@ struct AstExpr
     AstExprPrefix prefix;
     AstExprInfix infix;
     AstExprIf if_else;
+    AstExprFunction function;
   } data;
 };
 
@@ -883,15 +899,31 @@ parse_build_expr_string(StrBuilder8 *b, AstExpr *expr)
     case AstExpr_IfElse:
       str8_append_lit(b, "if");
       parse_build_expr_string(b, expr->data.if_else.condition);
-      str8_append_lit(b, " { ");
+      str8_append_lit(b, "{ ");
       parse_build_stmt_string(b, expr->data.if_else.consequence->statements);
-      str8_append_lit(b, " } ");
+      str8_append_lit(b, " }");
       if (expr->data.if_else.alternative != 0)
       {
-        str8_append_lit(b, " else { ");
+        str8_append_lit(b, "else{ ");
         parse_build_stmt_string(b, expr->data.if_else.alternative->statements);
         str8_append_lit(b, " }");
       }
+      break;
+
+    case AstExpr_Function:
+      str8_append_lit(b, "fn (");
+      if (expr->data.function.params != 0)
+      {
+        for (AstExprFunctionParam *param = expr->data.function.params;; param = param->next)
+        {
+          str8_append(b, param->identifier.token.value);
+          if (param->next == 0) break;
+          str8_append_lit(b, ",");
+        }
+      }
+      str8_append_lit(b, ") { ");
+      parse_build_stmt_string(b, expr->data.function.body->statements);
+      str8_append_lit(b, " }");
       break;
 
     default: str8_append_lit(b, "[INVALID EXPRESSION TAG]"); break;
@@ -1112,13 +1144,11 @@ parse_expr(Parser *p, Precedence precedence)
         Token if_token = p->curr_token;
 
         if (!parse_expect(p, TokenKind_LParen)) break;
-
         if_expr = arena_alloc_t(p->arena, AstExpr);
-
-        // TODO(tad): Advance past parenthesis for more useful if expression error messages instead
-        // of relying on grouped expression parsing.
+        parse_advance_token(p);
         AstExpr *condition = parse_expr(p, Precedence_Lowest);
         if (condition == 0) break;
+        if (!parse_expect(p, TokenKind_RParen)) break;
 
         if (!parse_expect(p, TokenKind_LBrace)) break;
         AstStmtBlock *consequence = parse_block(p);
@@ -1140,6 +1170,56 @@ parse_expr(Parser *p, Precedence precedence)
         break;
       }
 
+      case TokenKind_Function:
+      {
+        AstExpr *fn_expr;
+        Token fn_token = p->curr_token;
+
+        if (!parse_expect(p, TokenKind_LParen)) break;
+
+        fn_expr = arena_alloc_t(p->arena, AstExpr);
+
+        AstExprFunctionParam params_sentinel = { 0 };
+        AstExprFunctionParam *params_tail    = &params_sentinel;
+
+        if (p->peek_token.kind != TokenKind_RParen)
+        {
+          while (parse_expect(p, TokenKind_Identifier))
+          {
+            AstExprFunctionParam *param = arena_alloc_t(p->arena, AstExprFunctionParam);
+            param->identifier.token     = p->curr_token;
+
+            params_tail->next = param;
+            params_tail       = param;
+
+            if (p->peek_token.kind == TokenKind_RParen)
+            {
+              parse_advance_token(p);
+              break;
+            }
+
+            if (!parse_expect(p, TokenKind_Comma))
+            {
+              break;
+            }
+          }
+        }
+        else
+        {
+          parse_advance_token(p);
+        }
+
+        if (!parse_expect(p, TokenKind_LBrace)) break;
+        AstStmtBlock *body = parse_block(p);
+
+        lhs                       = fn_expr;
+        lhs->tag                  = AstExpr_Function;
+        lhs->data.function.token  = fn_token;
+        lhs->data.function.params = params_sentinel.next;
+        lhs->data.function.body   = body;
+        break;
+      }
+
       case TokenKind_LParen:
       {
         parse_advance_token(p);
@@ -1152,13 +1232,9 @@ parse_expr(Parser *p, Precedence precedence)
         break;
       }
 
-      case TokenKind_RParen:
+      // TODO(tad): Any of these prefix tokens?
       case TokenKind_LBrace:
-      case TokenKind_RBrace:
       case TokenKind_LBracket:
-      case TokenKind_RBracket:
-      case TokenKind_Function:
-      case TokenKind_Else:
       default:
         parse_error(p,
                     MessageLevel_Error,
@@ -2041,7 +2117,7 @@ test_parse_expr_if(void)
   test_assert_m(expr->data.if_else.alternative == 0, "expected no alternative");
 
   AstStmt *consequence = expr->data.if_else.consequence->statements;
-  test_assert_m(consequence != 0, "expected one consequence statement, parsed none");
+  test_assert_m(consequence != 0, "expected one consequence statement, parsed zero");
   test_assert_m(consequence->next == 0, "expected one consequence statement, parsed more");
   test_helper(test_literal_expr(consequence->data.expr.expr, AstExpr_Identifier, &str8_lit("x")));
 
@@ -2075,16 +2151,117 @@ test_parse_expr_if_else(void)
   test_assert_m(expr->data.if_else.alternative != 0, "expected alternative");
 
   AstStmt *consequence = expr->data.if_else.consequence->statements;
-  test_assert_m(consequence != 0, "expected one consequence statement, parsed none");
+  test_assert_m(consequence != 0, "expected one consequence statement, parsed zero");
   test_assert_m(consequence->next == 0, "expected one consequence statement, parsed more");
   test_helper(test_literal_expr(consequence->data.expr.expr, AstExpr_Identifier, &str8_lit("x")));
 
   AstStmt *alternative = expr->data.if_else.alternative->statements;
-  test_assert_m(consequence != 0, "expected one alternative statement, parsed none");
+  test_assert_m(consequence != 0, "expected one alternative statement, parsed zero");
   test_assert_m(alternative->next == 0, "expected one alternative statement, parsed more");
   test_helper(test_literal_expr(alternative->data.expr.expr, AstExpr_Identifier, &str8_lit("y")));
 
   parse_free(&p);
+
+  return 0;
+}
+
+internal int
+test_parse_expr_function_lit()
+{
+  Str8 input = str8_lit("fn(x, y) { x + y; }");
+
+  Parser p = parse(input);
+  test_helper(test_parse_check_messages(&p));
+
+  AstStmt *stmt = p.statements;
+  test_assert_m(stmt != 0, "expected function statement is null");
+  test_assert_m(stmt->next == 0, "expected one statement, parsed more");
+  test_assert_m(stmt->tag == AstStmt_Expr, "expected expression statement");
+
+  AstExpr *expr = stmt->data.expr.expr;
+  test_assert_m(expr != 0, "expected function expression is null");
+  test_assert_m(expr->tag == AstExpr_Function, "expected function expression");
+  test_assert_m(expr->data.function.token.kind == TokenKind_Function, "expected function token");
+
+  AstExprFunctionParam *param = expr->data.function.params;
+  test_assert_m(param != 0, "expected two function params, parsed zero");
+  test_assert_m(str8_equal(param->identifier.token.value, str8_lit("x")),
+                "expected param 'x', parsed '%.*s'",
+                str8_va(param->identifier.token.value));
+
+  param = param->next;
+  test_assert_m(param != 0, "expected two function params, parsed one");
+  test_assert_m(str8_equal(param->identifier.token.value, str8_lit("y")),
+                "expected param 'y', parsed '%.*s'",
+                str8_va(param->identifier.token.value));
+
+  param = param->next;
+  test_assert_m(param == 0, "expected two function params, parsed more");
+
+  test_assert_m(expr->data.function.body != 0, "expected body");
+
+  AstStmt *body = expr->data.function.body->statements;
+  test_assert_m(body != 0, "expected one body statement, parsed zero");
+  test_assert_m(body->next == 0, "expected one body statement, parsed more");
+  test_helper(test_infix_lit_expr(body->data.expr.expr,
+                                  TokenKind_Plus,
+                                  expected_lit(AstExpr_Identifier, Str8, str8_lit("x")),
+                                  expected_lit(AstExpr_Identifier, Str8, str8_lit("y"))));
+
+  parse_free(&p);
+
+  return 0;
+}
+
+internal int
+test_parse_expr_function_params()
+{
+  struct
+  {
+    Str8 input;
+    usize expected_count;
+    Str8 expected_params[3];
+  } tests[] = {
+    { str8_lit("fn(){}"), 0, {} },
+    { str8_lit("fn(x){}"), 1, { str8_lit("x") } },
+    { str8_lit("fn(x,y,z){}"), 3, { str8_lit("x"), str8_lit("y"), str8_lit("z") } },
+  };
+
+  for (usize i = 0; i < arr_count(tests); i++)
+  {
+    Parser p = parse(tests[i].input);
+    test_helper(test_parse_check_messages(&p));
+
+    AstStmt *stmt = p.statements;
+    test_assert_m(stmt != 0, "expected function statement is null");
+    test_assert_m(stmt->next == 0, "expected one statement, parsed more");
+    test_assert_m(stmt->tag == AstStmt_Expr, "expected expression statement");
+
+    AstExpr *expr = stmt->data.expr.expr;
+    test_assert_m(expr != 0, "expected function expression is null");
+    test_assert_m(expr->tag == AstExpr_Function, "expected function expression");
+    test_assert_m(expr->data.function.token.kind == TokenKind_Function, "expected function token");
+
+    AstExprFunctionParam *param = expr->data.function.params;
+    usize expected_count        = tests[i].expected_count;
+
+    for (usize p_index = 0; p_index < expected_count; p_index++)
+    {
+      test_assert_m(param != 0, "expected %zu function params, parsed %zu", expected_count, p_index);
+
+      Str8 expected_param = tests[i].expected_params[p_index];
+      test_assert_m(str8_equal(param->identifier.token.value, expected_param),
+                    "expected param '%.*s', parsed '%.*s'",
+                    str8_va(expected_param),
+                    str8_va(param->identifier.token.value));
+
+      param = param->next;
+    }
+
+    test_assert_m(param == 0, "expected %zu function params, parsed more", tests[i].expected_count);
+
+    parse_free(&p);
+  }
 
   return 0;
 }
@@ -2219,6 +2396,8 @@ test(void)
   result += test_parse_expr_infix();
   result += test_parse_expr_if();
   result += test_parse_expr_if_else();
+  result += test_parse_expr_function_lit();
+  result += test_parse_expr_function_params();
 
   result += test_parse_op_precedence();
 
