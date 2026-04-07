@@ -715,11 +715,19 @@ typedef enum
   AstExpr_Infix,
   AstExpr_IfElse,
   AstExpr_Function,
+  AstExpr_Call,
   AstExpr_COUNT,
 } AstExprKind;
 
 typedef struct AstStmt AstStmt;
 typedef struct AstExpr AstExpr;
+
+typedef struct AstStmtBlock AstStmtBlock;
+struct AstStmtBlock
+{
+  Token token;
+  AstStmt *statements;
+};
 
 typedef struct AstExprIdentifier AstExprIdentifier;
 struct AstExprIdentifier
@@ -756,13 +764,6 @@ struct AstExprInfix
   AstExpr *rhs;
 };
 
-typedef struct AstStmtBlock AstStmtBlock;
-struct AstStmtBlock
-{
-  Token token;
-  AstStmt *statements;
-};
-
 typedef struct AstExprIf AstExprIf;
 struct AstExprIf
 {
@@ -787,6 +788,21 @@ struct AstExprFunction
   AstStmtBlock *body;
 };
 
+typedef struct AstExprCallArg AstExprCallArg;
+struct AstExprCallArg
+{
+  AstExprCallArg *next;
+  AstExpr *expr;
+};
+
+typedef struct AstExprCall AstExprCall;
+struct AstExprCall
+{
+  Token token;
+  AstExpr *function;
+  AstExprCallArg *args;
+};
+
 struct AstExpr
 {
   AstExprKind tag;
@@ -799,6 +815,7 @@ struct AstExpr
     AstExprInfix infix;
     AstExprIf if_else;
     AstExprFunction function;
+    AstExprCall call;
   } data;
 };
 
@@ -914,16 +931,33 @@ parse_build_expr_string(StrBuilder8 *b, AstExpr *expr)
       str8_append_lit(b, "fn(");
       if (expr->data.function.params != 0)
       {
-        for (AstExprFunctionParam *param = expr->data.function.params;; param = param->next)
+        AstExprFunctionParam *param = expr->data.function.params;
+        for (;;)
         {
           str8_append(b, param->identifier.token.value);
-          if (param->next == 0) break;
+          if ((param = param->next) == 0) break;
           str8_append_lit(b, ",");
         }
       }
       str8_append_lit(b, "){ ");
       parse_build_stmt_string(b, expr->data.function.body->statements);
       str8_append_lit(b, " }");
+      break;
+
+    case AstExpr_Call:
+      parse_build_expr_string(b, expr->data.call.function);
+      str8_append_lit(b, "(");
+      if (expr->data.call.args != 0)
+      {
+        AstExprCallArg *arg = expr->data.call.args;
+        for (;;)
+        {
+          parse_build_expr_string(b, arg->expr);
+          if ((arg = arg->next) == 0) break;
+          str8_append_lit(b, ",");
+        }
+      }
+      str8_append_lit(b, ")");
       break;
 
     default: str8_append_lit(b, "[INVALID EXPRESSION TAG]"); break;
@@ -1050,6 +1084,8 @@ parse_get_precedence(TokenKind kind)
 
     case TokenKind_Slash:
     case TokenKind_Star: return Precedence_Product;
+
+    case TokenKind_LParen: return Precedence_Call;
 
     default: return Precedence_Lowest;
   }
@@ -1232,9 +1268,6 @@ parse_expr(Parser *p, Precedence precedence)
         break;
       }
 
-      // TODO(tad): Any of these prefix tokens?
-      case TokenKind_LBrace:
-      case TokenKind_LBracket:
       default:
         parse_error(p,
                     MessageLevel_Error,
@@ -1274,6 +1307,54 @@ parse_expr(Parser *p, Precedence precedence)
         infix->data.infix.rhs = parse_expr(p, infix_precedence);
 
         lhs = infix;
+        break;
+      }
+
+      case TokenKind_LParen:
+      {
+        parse_advance_token(p);
+
+        Token call_token = p->curr_token;
+
+        AstExprCallArg args_sentinel = { 0 };
+        AstExprCallArg *args_tail    = &args_sentinel;
+
+        if (p->peek_token.kind != TokenKind_RParen)
+        {
+          for (;;)
+          {
+            parse_advance_token(p);
+
+            AstExprCallArg *arg = arena_alloc_t(p->arena, AstExprCallArg);
+            arg->expr           = parse_expr(p, Precedence_Lowest);
+
+            args_tail->next = arg;
+            args_tail       = arg;
+
+            if (p->peek_token.kind == TokenKind_RParen)
+            {
+              parse_advance_token(p);
+              break;
+            }
+
+            if (!parse_expect(p, TokenKind_Comma))
+            {
+              break;
+            }
+          }
+        }
+        else
+        {
+          parse_advance_token(p);
+        }
+
+        AstExpr *call            = arena_alloc_t(p->arena, AstExpr);
+        call->tag                = AstExpr_Call;
+        call->data.call.token    = call_token;
+        call->data.call.function = lhs;
+        call->data.call.args     = args_sentinel.next;
+
+        lhs = call;
         break;
       }
 
@@ -2182,7 +2263,7 @@ test_parse_expr_if_else(void)
 }
 
 internal int
-test_parse_expr_function_lit()
+test_parse_expr_function_lit(void)
 {
   Str8 input = str8_lit("fn(x, y) { x + y; }");
 
@@ -2197,7 +2278,6 @@ test_parse_expr_function_lit()
   AstExpr *expr = stmt->data.expr.expr;
   test_assert_m(expr != 0, "expected function expression is null");
   test_assert_m(expr->tag == AstExpr_Function, "expected function expression");
-  test_assert_m(expr->data.function.token.kind == TokenKind_Function, "expected function token");
 
   AstExprFunctionParam *param = expr->data.function.params;
   test_assert_m(param != 0, "expected two function params, parsed zero");
@@ -2230,7 +2310,7 @@ test_parse_expr_function_lit()
 }
 
 internal int
-test_parse_expr_function_params()
+test_parse_expr_function_params(void)
 {
   struct
   {
@@ -2256,7 +2336,6 @@ test_parse_expr_function_params()
     AstExpr *expr = stmt->data.expr.expr;
     test_assert_m(expr != 0, "expected function expression is null");
     test_assert_m(expr->tag == AstExpr_Function, "expected function expression");
-    test_assert_m(expr->data.function.token.kind == TokenKind_Function, "expected function token");
 
     AstExprFunctionParam *param = expr->data.function.params;
     usize expected_count        = tests[i].expected_count;
@@ -2275,6 +2354,107 @@ test_parse_expr_function_params()
     }
 
     test_assert_m(param == 0, "expected %zu function params, parsed more", tests[i].expected_count);
+
+    parse_free(&p);
+  }
+
+  return 0;
+}
+
+internal int
+test_parse_expr_call(void)
+{
+  Str8 input = str8_lit("add(1, 2 * 3, val);");
+
+  Parser p = parse(input);
+  test_helper(test_parse_check_messages(&p));
+
+  AstStmt *stmt = p.statements;
+  test_assert_m(stmt != 0, "expected call statement is null");
+  test_assert_m(stmt->next == 0, "expected one statement, parsed more");
+  test_assert_m(stmt->tag == AstStmt_Expr, "expected expression statement");
+
+  AstExpr *expr = stmt->data.expr.expr;
+  test_assert_m(expr != 0, "expected call expression is null");
+  test_assert_m(expr->tag == AstExpr_Call, "expected call expression");
+
+  AstExpr *fn = expr->data.call.function;
+  test_assert_m(fn != 0, "expected two function params, parsed zero");
+  test_assert_m(str8_equal(fn->data.identifier.token.value, str8_lit("add")),
+                "expected call function 'add', parsed '%.*s'",
+                str8_va(fn->data.identifier.token.value));
+
+  AstExprCallArg *arg = expr->data.call.args;
+  test_assert_m(arg != 0, "expected three function params, parsed zero");
+  test_helper(test_lit_expr(arg->expr, expected_lit(AstExpr_Number, s64, 1)));
+
+  arg = arg->next;
+  test_assert_m(arg != 0, "expected three function params, parsed one");
+  test_helper(test_infix_lit_expr(arg->expr,
+                                  TokenKind_Star,
+                                  expected_lit(AstExpr_Number, s64, 2),
+                                  expected_lit(AstExpr_Number, s64, 3)));
+
+  arg = arg->next;
+  test_assert_m(arg != 0, "expected three function params, parsed two");
+  test_helper(test_literal_expr(arg->expr, AstExpr_Identifier, &str8_lit("val")));
+
+  arg = arg->next;
+  test_assert_m(arg == 0, "expected three function params, parsed more");
+
+  parse_free(&p);
+
+  return 0;
+}
+
+internal int
+test_parse_expr_call_args(void)
+{
+  struct
+  {
+    Str8 input;
+    usize expected_count;
+    ExpectedLitExpr expected_args[3];
+  } tests[] = {
+    { str8_lit("call();"), 0, {} },
+    { str8_lit("call(1);"), 1, { expected_lit(AstExpr_Number, s64, 1) } },
+    {
+      str8_lit("call(1,val,false);"),
+      3,
+      {
+        expected_lit(AstExpr_Number, s64, 1),
+        expected_lit(AstExpr_Identifier, Str8, str8_lit("val")),
+        expected_lit(AstExpr_Boolean, b8, false),
+      },
+    },
+  };
+
+  for (usize i = 0; i < arr_count(tests); i++)
+  {
+    Parser p = parse(tests[i].input);
+    test_helper(test_parse_check_messages(&p));
+
+    AstStmt *stmt = p.statements;
+    test_assert_m(stmt != 0, "expected call statement is null");
+    test_assert_m(stmt->next == 0, "expected one statement, parsed more");
+    test_assert_m(stmt->tag == AstStmt_Expr, "expected expression statement");
+
+    AstExpr *expr = stmt->data.expr.expr;
+    test_assert_m(expr != 0, "expected call expression is null");
+    test_assert_m(expr->tag == AstExpr_Call, "expected call expression");
+
+    AstExprCallArg *arg  = expr->data.call.args;
+    usize expected_count = tests[i].expected_count;
+
+    for (usize a_index = 0; a_index < expected_count; a_index++)
+    {
+      test_assert_m(arg != 0, "expected %zu call args, parsed %zu", expected_count, a_index);
+      test_helper(test_lit_expr(arg->expr, tests[i].expected_args[a_index]));
+
+      arg = arg->next;
+    }
+
+    test_assert_m(arg == 0, "expected %zu call args, parsed more", tests[i].expected_count);
 
     parse_free(&p);
   }
@@ -2374,6 +2554,19 @@ test_parse_op_precedence(void)
       str8_lit("!(true == true)"),
       str8_lit("(!(true == true))"),
     },
+
+    {
+      str8_lit("a + add(b * c) + d"),
+      str8_lit("((a + add((b * c))) + d)"),
+    },
+    {
+      str8_lit("add(a, b, 1, 2 * 3, 4 + 5, add(6, 7 * 8))"),
+      str8_lit("add(a,b,1,(2 * 3),(4 + 5),add(6,(7 * 8)))"),
+    },
+    {
+      str8_lit("add(a + b + c * d / f + g)"),
+      str8_lit("add((((a + b) + ((c * d) / f)) + g))"),
+    },
   };
 
   for (usize i = 0; i < arr_count(tests); i++)
@@ -2413,6 +2606,8 @@ test(void)
   result += test_parse_expr_if_else();
   result += test_parse_expr_function_lit();
   result += test_parse_expr_function_params();
+  result += test_parse_expr_call();
+  result += test_parse_expr_call_args();
 
   result += test_parse_op_precedence();
 
