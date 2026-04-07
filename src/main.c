@@ -1009,6 +1009,7 @@ parse_print_messages(Parser *p)
 {
   for (Message *m = p->message_list.first; m != 0; m = m->next)
   {
+    // TODO(tad): print error level
     printf("%.*s\n", str8_va(m->value));
   }
 }
@@ -1515,7 +1516,8 @@ parse(Str8 input)
 // main
 
 internal int test(void);
-internal int repl(void);
+internal int rlpl(void);
+internal int rppl(void);
 
 int
 main(int argc, char *argv[])
@@ -1528,9 +1530,14 @@ main(int argc, char *argv[])
       return test();
     }
 
-    if (strcmp(argv[1], "int") == 0)
+    if (strcmp(argv[1], "lex") == 0)
     {
-      return repl();
+      return rlpl();
+    }
+
+    if (strcmp(argv[1], "parse") == 0)
+    {
+      return rppl();
     }
 
     FILE *f = fopen(argv[1], "rb");
@@ -1597,7 +1604,7 @@ main(int argc, char *argv[])
 // repl
 
 internal int
-repl(void)
+rlpl(void)
 {
   char const *PROMPT = ">> ";
   char buffer[KiB(4)];
@@ -1623,6 +1630,50 @@ repl(void)
 
     Str8 input = str8_from_cstr(buffer);
     lex_print(input);
+
+    print_prompt = input.buf[input.len - 1] == '\n';
+  }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// rppl
+
+internal int
+rppl(void)
+{
+  char const *PROMPT = ">> ";
+  char buffer[KiB(4)];
+  b32 print_prompt = true;
+
+  for (;;)
+  {
+    if (print_prompt) printf("%s", PROMPT);
+
+    if (fgets(buffer, sizeof(buffer), stdin) == NULL)
+    {
+      if (feof(stdin))
+      {
+        return 0;
+      }
+      else
+      {
+        perror("read input failed");
+        clearerr(stdin);
+        continue;
+      }
+    }
+
+    Str8 input = str8_from_cstr(buffer);
+    Parser p   = parse(input);
+
+    parse_print_messages(&p);
+
+    if (p.message_list.level < MessageLevel_Error)
+    {
+      printf("%.*s\n", str8_va(parse_to_string(&p)));
+    }
+
+    parse_free(&p);
 
     print_prompt = input.buf[input.len - 1] == '\n';
   }
