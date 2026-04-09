@@ -236,6 +236,8 @@ arena_tmp_commit(TmpArena *tmp)
 internal void
 arena_tmp_end(TmpArena tmp)
 {
+  if (tmp.arena == 0) return;
+
   Arena *arena = tmp.arena;
 
   while (arena->current != tmp.block)
@@ -1513,11 +1515,49 @@ parse(Str8 input)
 }
 
 ////////////////////////////////////////////////////////////////////////////////
+// eval
+
+typedef enum
+{
+  ObjectKind_Number,
+  ObjectKind_COUNT
+} ObjectKind;
+
+typedef struct ObjectNumber ObjectNumber;
+struct ObjectNumber
+{
+  s64 value;
+};
+
+typedef struct Object Object;
+struct Object
+{
+  ObjectKind tag;
+  union
+  {
+    ObjectNumber number;
+  } data;
+};
+
+internal Str8
+eval_inspect(Object o)
+{
+  return (Str8){ 0 };
+}
+
+internal Object
+eval(AstStmt *stmt)
+{
+  return (Object){ 0 };
+}
+
+////////////////////////////////////////////////////////////////////////////////
 // main
 
 internal int test(void);
 internal int rlpl(void);
 internal int rppl(void);
+internal int repl(void);
 
 int
 main(int argc, char *argv[])
@@ -1538,6 +1578,11 @@ main(int argc, char *argv[])
     if (strcmp(argv[1], "parse") == 0)
     {
       return rppl();
+    }
+
+    if (strcmp(argv[1], "int") == 0)
+    {
+      return repl();
     }
 
     FILE *f = fopen(argv[1], "rb");
@@ -1601,7 +1646,7 @@ main(int argc, char *argv[])
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-// repl
+// rlpl
 
 internal int
 rlpl(void)
@@ -1671,6 +1716,51 @@ rppl(void)
     if (p.message_list.level < MessageLevel_Error)
     {
       printf("%.*s\n", str8_va(parse_to_string(&p)));
+    }
+
+    parse_free(&p);
+
+    print_prompt = input.buf[input.len - 1] == '\n';
+  }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// repl
+
+internal int
+repl(void)
+{
+  char const *PROMPT = ">> ";
+  char buffer[KiB(4)];
+  b32 print_prompt = true;
+
+  for (;;)
+  {
+    if (print_prompt) printf("%s", PROMPT);
+
+    if (fgets(buffer, sizeof(buffer), stdin) == NULL)
+    {
+      if (feof(stdin))
+      {
+        return 0;
+      }
+      else
+      {
+        perror("read input failed");
+        clearerr(stdin);
+        continue;
+      }
+    }
+
+    Str8 input = str8_from_cstr(buffer);
+    Parser p   = parse(input);
+
+    parse_print_messages(&p);
+
+    if (p.message_list.level < MessageLevel_Error)
+    {
+      Object result = eval(p.statements);
+      printf("%.*s\n", str8_va(eval_inspect(result)));
     }
 
     parse_free(&p);
