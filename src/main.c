@@ -502,11 +502,22 @@ struct Token
   TokenKind kind;
 };
 
+internal const Str8 KEYWORD_FUNCTION = str8_lit("fn");
+internal const Str8 KEYWORD_LET      = str8_lit("let");
+internal const Str8 KEYWORD_TRUE     = str8_lit("true");
+internal const Str8 KEYWORD_FALSE    = str8_lit("false");
+internal const Str8 KEYWORD_IF       = str8_lit("if");
+internal const Str8 KEYWORD_ELSE     = str8_lit("else");
+internal const Str8 KEYWORD_RETURN   = str8_lit("return");
+
 internal Token keyword_tokens[] = {
-  { str8_lit("fn"), TokenKind_Function },   { str8_lit("let"), TokenKind_Let },
-  { str8_lit("true"), TokenKind_True },     { str8_lit("false"), TokenKind_False },
-  { str8_lit("if"), TokenKind_If },         { str8_lit("else"), TokenKind_Else },
-  { str8_lit("return"), TokenKind_Return },
+  { KEYWORD_FUNCTION, TokenKind_Function },
+  { KEYWORD_LET, TokenKind_Let },
+  { KEYWORD_TRUE, TokenKind_True },
+  { KEYWORD_FALSE, TokenKind_False },
+  { KEYWORD_IF, TokenKind_If },
+  { KEYWORD_ELSE, TokenKind_Else },
+  { KEYWORD_RETURN, TokenKind_Return },
 };
 
 typedef struct Lexer Lexer;
@@ -1520,6 +1531,8 @@ parse(Str8 input)
 typedef enum
 {
   ObjectKind_Number,
+  ObjectKind_Boolean,
+  ObjectKind_Null,
   ObjectKind_COUNT
 } ObjectKind;
 
@@ -1529,6 +1542,17 @@ struct ObjectNumber
   s64 value;
 };
 
+typedef struct ObjectBoolean ObjectBoolean;
+struct ObjectBoolean
+{
+  b8 value;
+};
+
+typedef struct ObjectNull ObjectNull;
+struct ObjectNull
+{
+};
+
 typedef struct Object Object;
 struct Object
 {
@@ -1536,19 +1560,79 @@ struct Object
   union
   {
     ObjectNumber number;
+    ObjectBoolean boolean;
+    ObjectNull null;
   } data;
 };
 
+internal Object const *OBJECT_TRUE  = &(Object){ ObjectKind_Boolean, { .boolean.value = true } };
+internal Object const *OBJECT_FALSE = &(Object){ ObjectKind_Boolean, { .boolean.value = false } };
+internal Object const *OBJECT_NULL  = &(Object){ ObjectKind_Null, { 0 } };
+
 internal Str8
-eval_inspect(Object o)
+eval_inspect(Object const *o, Arena *arena)
 {
-  return (Str8){ 0 };
+  Str8 result = { 0 };
+  switch (o->tag)
+  {
+    case ObjectKind_Number: result = str8_f(arena, "%lld", o->data.number.value); break;
+    case ObjectKind_Boolean: result = o->data.boolean.value ? KEYWORD_TRUE : KEYWORD_FALSE; break;
+    case ObjectKind_Null: result = str8_lit("null"); break;
+    default:
+      // TODO(tad): error
+      break;
+  }
+
+  return result;
 }
 
-internal Object
-eval(AstStmt *stmt)
+internal Object const *
+eval_expr(AstExpr *expr, Arena *arena)
 {
-  return (Object){ 0 };
+  switch (expr->tag)
+  {
+    case AstExpr_Identifier: break;
+    case AstExpr_Number:
+    {
+      Object *result            = arena_alloc_t(arena, Object);
+      result->tag               = ObjectKind_Number;
+      result->data.number.value = expr->data.number.value;
+      return result;
+    }
+    case AstExpr_Boolean:
+    {
+      return expr->data.boolean.value ? OBJECT_TRUE : OBJECT_FALSE;
+      break;
+    }
+    case AstExpr_Prefix: break;
+    case AstExpr_Infix: break;
+    case AstExpr_IfElse: break;
+    case AstExpr_Function: break;
+    case AstExpr_Call: break;
+    default:
+      // TODO(tad): error
+      break;
+  }
+
+  return OBJECT_NULL;
+}
+
+internal Object const *
+eval_stmt(AstStmt *statements, Arena *arena)
+{
+  Object const *result;
+  for (AstStmt *stmt = statements; stmt != 0; stmt = stmt->next)
+  {
+    switch (stmt->tag)
+    {
+      case AstStmt_Let: break;
+      case AstStmt_Ret: break;
+      case AstStmt_Expr: result = eval_expr(stmt->data.expr.expr, arena); break;
+      default: break;
+    }
+  }
+
+  return result;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -1759,8 +1843,11 @@ repl(void)
 
     if (p.message_list.level < MessageLevel_Error)
     {
-      Object result = eval(p.statements);
-      printf("%.*s\n", str8_va(eval_inspect(result)));
+      Arena *a             = arena_tl_get();
+      TmpArena t           = arena_tmp_begin(a);
+      Object const *result = eval_stmt(p.statements, p.arena);
+      printf("%.*s\n", str8_va(eval_inspect(result, a)));
+      arena_tmp_end(t);
     }
 
     parse_free(&p);
