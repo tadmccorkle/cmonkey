@@ -1646,11 +1646,13 @@ internal int repl(void);
 int
 main(int argc, char *argv[])
 {
-  Str8 input = { 0 };
+  // TODO(tad): What to do with input?
+
   if (argc > 1)
   {
     if (strcmp(argv[1], "test") == 0)
     {
+      // TODO(tad): Remove tests from main program.
       return test();
     }
 
@@ -1664,11 +1666,7 @@ main(int argc, char *argv[])
       return rppl();
     }
 
-    if (strcmp(argv[1], "int") == 0)
-    {
-      return repl();
-    }
-
+    /*
     FILE *f = fopen(argv[1], "rb");
     {
       fseek(f, 0, SEEK_END);
@@ -1680,53 +1678,10 @@ main(int argc, char *argv[])
     fread(buf, input.len, 1, f);
     input.buf = buf;
     fclose(f);
-
-    printf("tokenized '%s':\n\n", argv[1]);
-  }
-  else
-  {
-    input = str8_lit("let five = 5;\n"
-                     "let ten = 10;\n"
-                     "\n"
-                     "let add = fn(x, y) {\n"
-                     "  x + y;\n"
-                     "};\n"
-                     "\n"
-                     "let result = add(five, ten);"
-                     "\n"
-                     "!-/*5;\n"
-                     "5 < 10 > 5\n"
-                     "\n"
-                     "if (5 < 10) {\n"
-                     "  return true;\n"
-                     "} else {\n"
-                     "  return false;\n"
-                     "}\n"
-                     "\n"
-                     "10 == 10\n"
-                     "10 != 9\n"
-                     "@\n"
-                     "");
-
-    printf("test input:\n\n%.*s", str8_va(input));
-    printf("\n---------------\n\n");
-    printf("tokenized test input:\n\n");
+    */
   }
 
-  lex_print(input);
-
-  Parser p            = parse(input);
-  Str8 parsed_program = parse_to_string(&p);
-  printf("\nParsed program:\n\n");
-  printf("%.*s\n", str8_va(parsed_program));
-  if (p.message_list.count > 0)
-  {
-    printf("\n---------------\n\n");
-    parse_print_messages(&p);
-  }
-  parse_free(&p);
-
-  return 0;
+  return repl();
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -2816,6 +2771,68 @@ test_parse_op_precedence(void)
 }
 
 internal int
+test_eval_number_expr(void)
+{
+  struct
+  {
+    Str8 input;
+    s64 expected;
+  } tests[] = {
+    { str8_lit("7"), 7 },
+    { str8_lit("29"), 29 },
+    // TODO(tad): support { str8_lit("-31"), -31 },
+  };
+
+  for (usize i = 0; i < arr_count(tests); i++)
+  {
+    Parser p = parse(tests[i].input);
+    test_helper(test_parse_check_messages(&p));
+
+    Object const *result = eval_stmt(p.statements, p.arena);
+    test_assert_m(result->tag == ObjectKind_Number, "expected number object");
+    test_assert_m(result->data.number.value == tests[i].expected,
+                  "expected number value '%lld', evaluated '%lld'",
+                  tests[i].expected,
+                  result->data.number.value);
+
+    parse_free(&p);
+  }
+
+  return 0;
+}
+
+internal int
+test_eval_boolean_expr(void)
+{
+  struct
+  {
+    Str8 input;
+    b8 expected;
+  } tests[] = {
+    { str8_lit("true"), true },
+    { str8_lit("false"), false },
+    // TODO(tad): support others
+  };
+
+  for (usize i = 0; i < arr_count(tests); i++)
+  {
+    Parser p = parse(tests[i].input);
+    test_helper(test_parse_check_messages(&p));
+
+    Object const *result = eval_stmt(p.statements, p.arena);
+    test_assert_m(result->tag == ObjectKind_Boolean, "expected boolean object");
+    test_assert_m(result->data.number.value == tests[i].expected,
+                  "expected boolean value '%d', evaluated '%d'",
+                  tests[i].expected,
+                  result->data.boolean.value);
+
+    parse_free(&p);
+  }
+
+  return 0;
+}
+
+internal int
 test(void)
 {
   int result = 0;
@@ -2838,6 +2855,9 @@ test(void)
   result += test_parse_expr_call_args();
 
   result += test_parse_op_precedence();
+
+  result += test_eval_number_expr();
+  result += test_eval_boolean_expr();
 
   return result;
 }
