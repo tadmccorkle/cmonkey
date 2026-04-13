@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <ctype.h>
+#include <errno.h>
 #include <stdarg.h>
 #include <stdatomic.h>
 #include <stdbool.h>
@@ -374,7 +375,7 @@ str8_append_fv(StrBuilder8 *builder, char const *fmt, va_list args)
   va_list args2;
   va_copy(args2, args);
   usize append_len = vsnprintf(0, 0, fmt, args);
-  str8_ensure_capacity(builder, builder->len + append_len);
+  str8_ensure_capacity(builder, builder->len + append_len + 1);
   vsnprintf((char *)builder->buf + builder->len, append_len + 1, fmt, args2);
   builder->len += append_len;
   va_end(args2);
@@ -615,30 +616,32 @@ lex_advance_token(Lexer *l, Token *token)
 
     default:
     {
-      usize length = 0;
-      usize pos    = l->pos;
-
       if (is_digit(ch))
       {
-        do length += 1;
-        while (pos < l->input.len && is_digit(l->input.buf[++pos]));
+        usize len = 1;
+        while (l->pos + len < l->input.len && is_digit(l->input.buf[l->pos + len]))
+        {
+          len += 1;
+        }
 
-        lex_init_token(l, token, length, TokenKind_Number);
+        lex_init_token(l, token, len, TokenKind_Number);
       }
       else if (ch == '_' || is_letter(ch))
       {
-        do
+        usize len = 1;
+        while (l->pos + len < l->input.len)
         {
-          length += 1;
-          ch = l->input.buf[++pos];
-        } while (pos < l->input.len && (ch == '_' || is_letter(ch) || is_digit(ch)));
+          ch = l->input.buf[l->pos + len];
+          if (ch != '_' && !is_letter(ch) && !is_digit(ch)) break;
+          len += 1;
+        }
 
         TokenKind kind = TokenKind_Identifier;
         for (usize i = 0; i < arr_count(keyword_tokens); i++)
         {
           Str8 keyword = keyword_tokens[i].value;
 
-          if (keyword.len != length) continue;
+          if (keyword.len != len) continue;
 
           if (!memcmp(keyword.buf, &l->input.buf[l->pos], keyword.len))
           {
@@ -646,7 +649,7 @@ lex_advance_token(Lexer *l, Token *token)
           }
         }
 
-        lex_init_token(l, token, length, kind);
+        lex_init_token(l, token, len, kind);
       }
       else
       {
@@ -1162,8 +1165,31 @@ parse_expr(Parser *p, Precedence precedence)
         lhs                    = arena_alloc_t(p->arena, AstExpr);
         lhs->tag               = AstExpr_Number;
         lhs->data.number.token = p->curr_token;
-        // TODO(tad): handle error here, could use tmp buf to ensure null termination
-        lhs->data.number.value = strtoll((char *)p->curr_token.value.buf, 0, 10);
+
+        u8 buf[64];
+        usize len = min(p->curr_token.value.len, sizeof(buf) - 1);
+        memcpy(buf, p->curr_token.value.buf, len);
+        buf[len] = 0;
+
+        char *end;
+        errno = 0;
+
+        lhs->data.number.value = strtoll((char *)buf, &end, 10);
+
+        if (errno == ERANGE)
+        {
+          parse_error(p,
+                      MessageLevel_Error,
+                      "Number literal '%.*s' is out of range.",
+                      str8_va(p->curr_token.value));
+        }
+        else if (end == (char *)buf)
+        {
+          parse_error(p,
+                      MessageLevel_Error,
+                      "'%.*s' is not a number literal.",
+                      str8_va(p->curr_token.value));
+        }
         break;
       }
 
@@ -1386,7 +1412,7 @@ parse_stmt(Parser *p)
 
   switch (p->curr_token.kind)
   {
-    // TODO(tad): some kinds are not appropriate here (e.g., semicolon)
+    // TODO(tad): Could provide better error messages if invalid expr tokens are handled here.
     case TokenKind_Identifier:
     case TokenKind_Number:
     case TokenKind_Assign:
@@ -1445,7 +1471,7 @@ parse_stmt(Parser *p)
       stmt->data.let.identifier = identifier;
       stmt->data.let.expr       = expr;
 
-      if (p->curr_token.kind != TokenKind_Semicolon)
+      if (p->peek_token.kind == TokenKind_Semicolon)
       {
         parse_advance_token(p);
       }
@@ -1466,7 +1492,7 @@ parse_stmt(Parser *p)
       stmt->data.ret.token = ret_token;
       stmt->data.ret.expr  = expr;
 
-      if (p->curr_token.kind != TokenKind_Semicolon)
+      if (p->peek_token.kind == TokenKind_Semicolon)
       {
         parse_advance_token(p);
       }
@@ -1620,7 +1646,7 @@ eval_expr(AstExpr *expr, Arena *arena)
 internal Object const *
 eval_stmt(AstStmt *statements, Arena *arena)
 {
-  Object const *result;
+  Object const *result = OBJECT_NULL;
   for (AstStmt *stmt = statements; stmt != 0; stmt = stmt->next)
   {
     switch (stmt->tag)
@@ -2821,7 +2847,7 @@ test_eval_boolean_expr(void)
 
     Object const *result = eval_stmt(p.statements, p.arena);
     test_assert_m(result->tag == ObjectKind_Boolean, "expected boolean object");
-    test_assert_m(result->data.number.value == tests[i].expected,
+    test_assert_m(result->data.boolean.value == tests[i].expected,
                   "expected boolean value '%d', evaluated '%d'",
                   tests[i].expected,
                   result->data.boolean.value);
