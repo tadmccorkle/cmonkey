@@ -1630,7 +1630,45 @@ eval_expr(AstExpr *expr, Arena *arena)
       return expr->data.boolean.value ? OBJECT_TRUE : OBJECT_FALSE;
       break;
     }
-    case AstExpr_Prefix: break;
+    case AstExpr_Prefix:
+    {
+      // TODO(tad): break this into separate functions, probably
+      switch (expr->data.prefix.token.kind)
+      {
+        case TokenKind_Bang:
+        {
+          // TODO(tad): this should only temporarily be allocated
+          Object const *rhs = eval_expr(expr->data.prefix.rhs, arena);
+
+          if (rhs == OBJECT_FALSE || rhs == OBJECT_NULL)
+          {
+            return OBJECT_TRUE;
+          }
+
+          return OBJECT_FALSE;
+        }
+
+        case TokenKind_Minus:
+        {
+          // TODO(tad): this should only temporarily be allocated
+          Object const *rhs = eval_expr(expr->data.prefix.rhs, arena);
+
+          if (rhs->tag == ObjectKind_Number)
+          {
+            // TODO(tad): can this allocation be avoided?
+            Object *result            = arena_alloc_t(arena, Object);
+            result->tag               = ObjectKind_Number;
+            result->data.number.value = -rhs->data.number.value;
+            return result;
+          }
+
+          return OBJECT_NULL;
+        }
+
+        default: return OBJECT_NULL;
+      }
+      break;
+    }
     case AstExpr_Infix: break;
     case AstExpr_IfElse: break;
     case AstExpr_Function: break;
@@ -2806,7 +2844,8 @@ test_eval_number_expr(void)
   } tests[] = {
     { str8_lit("7"), 7 },
     { str8_lit("29"), 29 },
-    // TODO(tad): support { str8_lit("-31"), -31 },
+    { str8_lit("-7"), -7 },
+    { str8_lit("-29"), -29 },
   };
 
   for (usize i = 0; i < arr_count(tests); i++)
@@ -2859,6 +2898,37 @@ test_eval_boolean_expr(void)
 }
 
 internal int
+test_eval_bang(void)
+{
+  struct
+  {
+    Str8 input;
+    b8 expected;
+  } tests[] = {
+    { str8_lit("!true"), false },   { str8_lit("!false"), true }, { str8_lit("!!true"), true },
+    { str8_lit("!!false"), false }, { str8_lit("!4"), false },    { str8_lit("!!4"), true },
+    { str8_lit("!!!4"), false },
+  };
+
+  for (usize i = 0; i < arr_count(tests); i++)
+  {
+    Parser p = parse(tests[i].input);
+    test_helper(test_parse_check_messages(&p));
+
+    Object const *result = eval_stmt(p.statements, p.arena);
+    test_assert_m(result->tag == ObjectKind_Boolean, "expected boolean object");
+    test_assert_m(result->data.boolean.value == tests[i].expected,
+                  "expected boolean value '%d', evaluated '%d'",
+                  tests[i].expected,
+                  result->data.boolean.value);
+
+    parse_free(&p);
+  }
+
+  return 0;
+}
+
+internal int
 test(void)
 {
   int result = 0;
@@ -2884,6 +2954,7 @@ test(void)
 
   result += test_eval_number_expr();
   result += test_eval_boolean_expr();
+  result += test_eval_bang();
 
   return result;
 }
