@@ -1615,6 +1615,7 @@ eval_inspect(Object const *o, Arena *arena)
 internal Object const *
 eval_expr(AstExpr *expr, Arena *arena)
 {
+  // TODO(tad): break most of this function into separate functions, probably
   switch (expr->tag)
   {
     case AstExpr_Identifier: break;
@@ -1634,7 +1635,6 @@ eval_expr(AstExpr *expr, Arena *arena)
 
     case AstExpr_Prefix:
     {
-      // TODO(tad): break this into separate functions, probably
       switch (expr->data.prefix.token.kind)
       {
         case TokenKind_Bang:
@@ -1680,51 +1680,76 @@ eval_expr(AstExpr *expr, Arena *arena)
       if (lhs->tag == ObjectKind_Number && rhs->tag == ObjectKind_Number)
       {
         Object *result = arena_alloc_t(arena, Object);
-        result->tag    = ObjectKind_Number;
 
         switch (expr->data.infix.token.kind)
         {
           case TokenKind_Plus:
           {
             result->data.number.value = lhs->data.number.value + rhs->data.number.value;
+            result->tag               = ObjectKind_Number;
             break;
           }
           case TokenKind_Minus:
           {
             result->data.number.value = lhs->data.number.value - rhs->data.number.value;
+            result->tag               = ObjectKind_Number;
             break;
           }
           case TokenKind_Star:
           {
             result->data.number.value = lhs->data.number.value * rhs->data.number.value;
+            result->tag               = ObjectKind_Number;
             break;
           }
           case TokenKind_Slash:
           {
             result->data.number.value = lhs->data.number.value / rhs->data.number.value;
+            result->tag               = ObjectKind_Number;
             break;
           }
           case TokenKind_Less:
           {
-            break;
+            return lhs->data.number.value < rhs->data.number.value ? OBJECT_TRUE : OBJECT_FALSE;
           }
           case TokenKind_Greater:
           {
-            break;
+            return lhs->data.number.value > rhs->data.number.value ? OBJECT_TRUE : OBJECT_FALSE;
           }
           case TokenKind_Equal:
           {
-            break;
+            return lhs->data.number.value == rhs->data.number.value ? OBJECT_TRUE : OBJECT_FALSE;
           }
           case TokenKind_NotEqual:
           {
-            break;
+            return lhs->data.number.value != rhs->data.number.value ? OBJECT_TRUE : OBJECT_FALSE;
           }
 
           default: return OBJECT_NULL;
         }
 
         return result;
+      }
+
+      switch (expr->data.infix.token.kind)
+      {
+        case TokenKind_Less:
+        {
+          return lhs < rhs ? OBJECT_TRUE : OBJECT_FALSE;
+        }
+        case TokenKind_Greater:
+        {
+          return lhs > rhs ? OBJECT_TRUE : OBJECT_FALSE;
+        }
+        case TokenKind_Equal:
+        {
+          return lhs == rhs ? OBJECT_TRUE : OBJECT_FALSE;
+        }
+        case TokenKind_NotEqual:
+        {
+          return lhs != rhs ? OBJECT_TRUE : OBJECT_FALSE;
+        }
+
+        default: return OBJECT_NULL;
       }
     }
 
@@ -2945,6 +2970,23 @@ test_eval_boolean_expr(void)
   } tests[] = {
     { str8_lit("true"), true },
     { str8_lit("false"), false },
+    { str8_lit("1 < 2"), true },
+    { str8_lit("1 > 2"), false },
+    { str8_lit("1 < 1"), false },
+    { str8_lit("1 > 1"), false },
+    { str8_lit("1 == 1"), true },
+    { str8_lit("1 != 1"), false },
+    { str8_lit("1 == 2"), false },
+    { str8_lit("1 != 2"), true },
+    { str8_lit("true == true"), true },
+    { str8_lit("false == false"), true },
+    { str8_lit("true == false"), false },
+    { str8_lit("true != false"), true },
+    { str8_lit("false != true"), true },
+    { str8_lit("(1 < 2) == true"), true },
+    { str8_lit("(1 < 2) == false"), false },
+    { str8_lit("(1 > 2) == true"), false },
+    { str8_lit("(1 > 2) == false"), true },
   };
 
   for (usize i = 0; i < arr_count(tests); i++)
