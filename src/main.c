@@ -1625,11 +1625,13 @@ eval_expr(AstExpr *expr, Arena *arena)
       result->data.number.value = expr->data.number.value;
       return result;
     }
+
     case AstExpr_Boolean:
     {
       return expr->data.boolean.value ? OBJECT_TRUE : OBJECT_FALSE;
       break;
     }
+
     case AstExpr_Prefix:
     {
       // TODO(tad): break this into separate functions, probably
@@ -1667,9 +1669,65 @@ eval_expr(AstExpr *expr, Arena *arena)
 
         default: return OBJECT_NULL;
       }
-      break;
     }
-    case AstExpr_Infix: break;
+
+    case AstExpr_Infix:
+    {
+      // TODO(tad): this should only temporarily be allocated
+      Object const *lhs = eval_expr(expr->data.infix.lhs, arena);
+      Object const *rhs = eval_expr(expr->data.infix.rhs, arena);
+
+      if (lhs->tag == ObjectKind_Number && rhs->tag == ObjectKind_Number)
+      {
+        Object *result = arena_alloc_t(arena, Object);
+        result->tag    = ObjectKind_Number;
+
+        switch (expr->data.infix.token.kind)
+        {
+          case TokenKind_Plus:
+          {
+            result->data.number.value = lhs->data.number.value + rhs->data.number.value;
+            break;
+          }
+          case TokenKind_Minus:
+          {
+            result->data.number.value = lhs->data.number.value - rhs->data.number.value;
+            break;
+          }
+          case TokenKind_Star:
+          {
+            result->data.number.value = lhs->data.number.value * rhs->data.number.value;
+            break;
+          }
+          case TokenKind_Slash:
+          {
+            result->data.number.value = lhs->data.number.value / rhs->data.number.value;
+            break;
+          }
+          case TokenKind_Less:
+          {
+            break;
+          }
+          case TokenKind_Greater:
+          {
+            break;
+          }
+          case TokenKind_Equal:
+          {
+            break;
+          }
+          case TokenKind_NotEqual:
+          {
+            break;
+          }
+
+          default: return OBJECT_NULL;
+        }
+
+        return result;
+      }
+    }
+
     case AstExpr_IfElse: break;
     case AstExpr_Function: break;
     case AstExpr_Call: break;
@@ -2846,6 +2904,17 @@ test_eval_number_expr(void)
     { str8_lit("29"), 29 },
     { str8_lit("-7"), -7 },
     { str8_lit("-29"), -29 },
+    { str8_lit("5 + 5 + 5 + 5 - 10"), 10 },
+    { str8_lit("2 * 2 * 2 * 2 * 2"), 32 },
+    { str8_lit("-50 + 100 + -50"), 0 },
+    { str8_lit("5 * 2 + 10"), 20 },
+    { str8_lit("5 + 2 * 10"), 25 },
+    { str8_lit("20 + 2 * -10"), 0 },
+    { str8_lit("50 / 2 * 2 + 10"), 60 },
+    { str8_lit("2 * (5 + 10)"), 30 },
+    { str8_lit("3 * 3 * 3 + 10"), 37 },
+    { str8_lit("3 * (3 * 3) + 10"), 37 },
+    { str8_lit("(5 + 10 * 2 + 15 / 3) * 2 + -10"), 50 },
   };
 
   for (usize i = 0; i < arr_count(tests); i++)
@@ -2876,7 +2945,6 @@ test_eval_boolean_expr(void)
   } tests[] = {
     { str8_lit("true"), true },
     { str8_lit("false"), false },
-    // TODO(tad): support others
   };
 
   for (usize i = 0; i < arr_count(tests); i++)
