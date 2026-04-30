@@ -1630,8 +1630,11 @@ typedef enum
   ObjectKind_Number,
   ObjectKind_Boolean,
   ObjectKind_Null,
+  ObjectKind_Return,
   ObjectKind_COUNT
 } ObjectKind;
+
+typedef struct Object Object;
 
 typedef struct ObjectNumber ObjectNumber;
 struct ObjectNumber
@@ -1650,7 +1653,12 @@ struct ObjectNull
 {
 };
 
-typedef struct Object Object;
+typedef struct ObjectReturn ObjectReturn;
+struct ObjectReturn
+{
+  Object const *value;
+};
+
 struct Object
 {
   ObjectKind tag;
@@ -1658,6 +1666,7 @@ struct Object
   {
     ObjectNumber number;
     ObjectBoolean boolean;
+    ObjectReturn ret;
     ObjectNull null;
   } data;
 };
@@ -1684,7 +1693,8 @@ eval_inspect(Object const *o, Arena *arena)
   return result;
 }
 
-internal Object const *eval_stmt(AstStmt *statements, Arena *arena);
+internal Object const *eval_program(AstStmt *statements, Arena *arena);
+internal Object const *eval_block(AstStmtBlock *block, Arena *arena);
 internal Object const *eval_expr(AstExpr *expr, Arena *arena);
 internal Object const *eval_expr_prefix(AstExprPrefix prefix, Arena *arena);
 internal Object const *eval_expr_infix(AstExprInfix infix, Arena *arena);
@@ -1807,11 +1817,11 @@ eval_expr_if_else(AstExprIfElse if_else, Arena *arena)
 
   if (condition)
   {
-    return eval_stmt(if_else.consequence->statements, arena);
+    return eval_block(if_else.consequence, arena);
   }
   else if (if_else.alternative != 0)
   {
-    return eval_stmt(if_else.alternative->statements, arena);
+    return eval_block(if_else.alternative, arena);
   }
   else
   {
@@ -1843,17 +1853,53 @@ eval_expr(AstExpr *expr, Arena *arena)
 }
 
 internal Object const *
-eval_stmt(AstStmt *statements, Arena *arena)
+eval_stmt(AstStmt *stmt, Arena *arena)
+{
+  switch (stmt->tag)
+  {
+    case AstStmt_Let: return OBJECT_NULL;
+    case AstStmt_Ret:
+    {
+      Object *ret         = arena_alloc_t(arena, Object);
+      ret->tag            = ObjectKind_Return;
+      ret->data.ret.value = eval_expr(stmt->data.expr.expr, arena);
+      return ret;
+    }
+    case AstStmt_Expr: return eval_expr(stmt->data.expr.expr, arena);
+    default: return OBJECT_NULL;
+  }
+}
+
+internal Object const *
+eval_block(AstStmtBlock *block, Arena *arena)
 {
   Object const *result = OBJECT_NULL;
+
+  for (AstStmt *stmt = block->statements; stmt != 0; stmt = stmt->next)
+  {
+    result = eval_stmt(stmt, arena);
+
+    if (result->tag == ObjectKind_Return)
+    {
+      return result;
+    }
+  }
+
+  return result;
+}
+
+internal Object const *
+eval_program(AstStmt *statements, Arena *arena)
+{
+  Object const *result = OBJECT_NULL;
+
   for (AstStmt *stmt = statements; stmt != 0; stmt = stmt->next)
   {
-    switch (stmt->tag)
+    result = eval_stmt(stmt, arena);
+
+    if (result->tag == ObjectKind_Return)
     {
-      case AstStmt_Let: break;
-      case AstStmt_Ret: break;
-      case AstStmt_Expr: result = eval_expr(stmt->data.expr.expr, arena); break;
-      default: break;
+      return result->data.ret.value;
     }
   }
 
@@ -2024,7 +2070,7 @@ repl(void)
     if (p.message_list.level < MessageLevel_Error)
     {
       TmpArena t           = scratch_begin(0);
-      Object const *result = eval_stmt(p.statements, p.arena);
+      Object const *result = eval_program(p.statements, p.arena);
       printf("%.*s\n", str8_va(eval_inspect(result, t.arena)));
       arena_tmp_end(t);
     }
@@ -3024,7 +3070,7 @@ test_eval_number_expr(void)
     Parser p = parse(tests[i].input);
     test_helper(test_parse_check_messages(&p));
 
-    Object const *result = eval_stmt(p.statements, p.arena);
+    Object const *result = eval_program(p.statements, p.arena);
     test_assert_m(result->tag == ObjectKind_Number, "expected number object");
     test_assert_m(result->data.number.value == tests[i].expected,
                   "expected number value '%lld', evaluated '%lld'",
@@ -3071,7 +3117,7 @@ test_eval_boolean_expr(void)
     Parser p = parse(tests[i].input);
     test_helper(test_parse_check_messages(&p));
 
-    Object const *result = eval_stmt(p.statements, p.arena);
+    Object const *result = eval_program(p.statements, p.arena);
     test_assert_m(result->tag == ObjectKind_Boolean, "expected boolean object");
     test_assert_m(result->data.boolean.value == tests[i].expected,
                   "expected boolean value '%d', evaluated '%d'",
@@ -3102,7 +3148,7 @@ test_eval_bang(void)
     Parser p = parse(tests[i].input);
     test_helper(test_parse_check_messages(&p));
 
-    Object const *result = eval_stmt(p.statements, p.arena);
+    Object const *result = eval_program(p.statements, p.arena);
     test_assert_m(result->tag == ObjectKind_Boolean, "expected boolean object");
     test_assert_m(result->data.boolean.value == tests[i].expected,
                   "expected boolean value '%d', evaluated '%d'",
@@ -3142,7 +3188,7 @@ test_eval_if_else_expr(void)
     Parser p = parse(tests[i].input);
     test_helper(test_parse_check_messages(&p));
 
-    Object const *result = eval_stmt(p.statements, p.arena);
+    Object const *result = eval_program(p.statements, p.arena);
     if (!tests[i].is_null)
     {
       test_assert_m(result->tag == ObjectKind_Number, "expected number object");
@@ -3157,6 +3203,39 @@ test_eval_if_else_expr(void)
       test_assert_m(result == tests[i].expected.nul,
                     "expected null but evaluated to different reference");
     }
+
+    parse_free(&p);
+  }
+
+  return 0;
+}
+
+internal int
+test_eval_return_stmt(void)
+{
+  struct
+  {
+    Str8 input;
+    s64 expected;
+  } tests[] = {
+    { str8_lit("return 10;"), 10 },
+    { str8_lit("return 10; 9;"), 10 },
+    { str8_lit("return 2 * 5; 9;"), 10 },
+    { str8_lit("9; return 2 * 5; 9;"), 10 },
+    { str8_lit("if (true) { if (true) { return 10; } } return 0;"), 10 },
+  };
+
+  for (usize i = 0; i < arr_count(tests); i++)
+  {
+    Parser p = parse(tests[i].input);
+    test_helper(test_parse_check_messages(&p));
+
+    Object const *result = eval_program(p.statements, p.arena);
+    test_assert_m(result->tag == ObjectKind_Number, "expected number object");
+    test_assert_m(result->data.number.value == tests[i].expected,
+                  "expected number value '%lld', evaluated '%lld'",
+                  tests[i].expected,
+                  result->data.number.value);
 
     parse_free(&p);
   }
@@ -3192,6 +3271,10 @@ test(void)
   result += test_eval_boolean_expr();
   result += test_eval_bang();
   result += test_eval_if_else_expr();
+
+  result += test_eval_return_stmt();
+
+  // TODO(tad): Investigate segfault when eval "1 == (return 1)"
 
   return result;
 }
