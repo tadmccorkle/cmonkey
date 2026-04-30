@@ -62,6 +62,35 @@ typedef b8 bool;
 #endif
 
 ////////////////////////////////////////////////////////////////////////////////
+// ll
+
+#define sll_append(t, n) \
+  do                     \
+  {                      \
+    (t)->next = (n);     \
+    (t)       = (n);     \
+    (t)->next = 0;       \
+  } while (0)
+
+#define SLL_BUILDER(T) \
+  struct               \
+  {                    \
+    T sentinel;        \
+    T *tail;           \
+  }
+
+#define sll_builder_init(b)            \
+  do                                   \
+  {                                    \
+    (b).tail          = &(b).sentinel; \
+    (b).sentinel.next = 0;             \
+  } while (0)
+
+#define sll_builder_append(b, n) sll_append((b).tail, (n))
+
+#define sll_builder_result(b) (b).sentinel.next
+
+////////////////////////////////////////////////////////////////////////////////
 // arena
 
 #pragma clang diagnostic push
@@ -208,15 +237,6 @@ arena_free(Arena *arena)
   free(arena);
 }
 
-internal per_thread Arena *tl_arena;
-
-internal Arena *
-arena_tl_get(void)
-{
-  if (!tl_arena) tl_arena = arena_create(ARENA_DEFAULT_SIZE);
-  return tl_arena;
-}
-
 internal TmpArena
 arena_tmp_begin(Arena *arena)
 {
@@ -250,6 +270,35 @@ arena_tmp_end(TmpArena tmp)
 
   arena->current->pos = tmp.pos;
 }
+
+#define SCRATCH_ARENA_COUNT 2
+
+internal per_thread Arena *tl_scratch_arenas[SCRATCH_ARENA_COUNT];
+
+internal TmpArena
+scratch_begin(Arena *conflict)
+{
+  if (!tl_scratch_arenas[0])
+  {
+    for (usize i = 0; i < SCRATCH_ARENA_COUNT; i++)
+    {
+      tl_scratch_arenas[i] = arena_create(ARENA_DEFAULT_SIZE);
+    }
+  }
+
+  for (usize i = 0; i < SCRATCH_ARENA_COUNT; i++)
+  {
+    if (tl_scratch_arenas[i] != conflict)
+    {
+      return arena_tmp_begin(tl_scratch_arenas[i]);
+    }
+  }
+
+  assert(!"No non-conflicting scratch arena available.");
+  return (TmpArena){ 0 };
+}
+
+#define scratch_end(scratch) arena_tmp_end(scratch)
 
 #pragma clang diagnostic pop
 
@@ -780,8 +829,8 @@ struct AstExprInfix
   AstExpr *rhs;
 };
 
-typedef struct AstExprIf AstExprIf;
-struct AstExprIf
+typedef struct AstExprIfElse AstExprIfElse;
+struct AstExprIfElse
 {
   Token token;
   AstExpr *condition;
@@ -829,7 +878,7 @@ struct AstExpr
     AstExprBoolean boolean;
     AstExprPrefix prefix;
     AstExprInfix infix;
-    AstExprIf if_else;
+    AstExprIfElse if_else;
     AstExprFunction function;
     AstExprCall call;
   } data;
@@ -1108,8 +1157,6 @@ parse_get_precedence(TokenKind kind)
   }
 }
 
-// TODO(tad): Refactor these to make use of new TmpArena commit function. Can rollback invalid
-// allocations instead of leaving in arena.
 internal AstStmt *parse_stmt(Parser *p);
 internal AstExpr *parse_expr(Parser *p, Precedence precedence);
 internal AstStmtBlock *parse_block(Parser *p);
@@ -1122,27 +1169,34 @@ parse_block(Parser *p)
 
   parse_advance_token(p);
 
-  AstStmt sentinel = { 0 };
-  AstStmt *tail    = &sentinel;
+  SLL_BUILDER(AstStmt) stmts;
+  sll_builder_init(stmts);
 
-  // TODO(tad): Error here if EOF is reached instead of RBrace?
   while (p->curr_token.kind != TokenKind_RBrace && p->curr_token.kind != TokenKind_EOF)
   {
     AstStmt *stmt = parse_stmt(p);
     if (stmt)
     {
-      tail->next = stmt;
-      tail       = stmt;
+      sll_builder_append(stmts, stmt);
     }
 
     parse_advance_token(p);
   }
 
-  block->statements = sentinel.next;
+  block->statements = sll_builder_result(stmts);
+
+  if (p->curr_token.kind == TokenKind_EOF)
+  {
+    parse_error(p, MessageLevel_Error, "Block reached EOF before closing '}'.");
+  }
 
   return block;
 }
 
+// TODO(tad): Consider refactoring various parts of this function:
+// - Use scratch arena instead of goto rollbacks.
+// - Pull prefix and infix into separate functions.
+// - Create creation functions for each expression type.
 internal AstExpr *
 parse_expr(Parser *p, Precedence precedence)
 {
@@ -1150,6 +1204,8 @@ parse_expr(Parser *p, Precedence precedence)
 
   // prefix
   {
+    TmpArena tmp;
+
     switch (p->curr_token.kind)
     {
       case TokenKind_Identifier:
@@ -1162,10 +1218,6 @@ parse_expr(Parser *p, Precedence precedence)
 
       case TokenKind_Number:
       {
-        lhs                    = arena_alloc_t(p->arena, AstExpr);
-        lhs->tag               = AstExpr_Number;
-        lhs->data.number.token = p->curr_token;
-
         u8 buf[64];
         usize len = min(p->curr_token.value.len, sizeof(buf) - 1);
         memcpy(buf, p->curr_token.value.buf, len);
@@ -1174,21 +1226,28 @@ parse_expr(Parser *p, Precedence precedence)
         char *end;
         errno = 0;
 
-        lhs->data.number.value = strtoll((char *)buf, &end, 10);
+        s64 number_value = strtoll((char *)buf, &end, 10);
 
         if (errno == ERANGE)
         {
           parse_error(p,
                       MessageLevel_Error,
-                      "Number literal '%.*s' is out of range.",
+                      "'%.*s' is not a number literal.",
                       str8_va(p->curr_token.value));
         }
         else if (end == (char *)buf)
         {
           parse_error(p,
                       MessageLevel_Error,
-                      "'%.*s' is not a number literal.",
+                      "Number literal '%.*s' is out of range.",
                       str8_va(p->curr_token.value));
+        }
+        else
+        {
+          lhs                    = arena_alloc_t(p->arena, AstExpr);
+          lhs->tag               = AstExpr_Number;
+          lhs->data.number.token = p->curr_token;
+          lhs->data.number.value = number_value;
         }
         break;
       }
@@ -1206,34 +1265,42 @@ parse_expr(Parser *p, Precedence precedence)
       case TokenKind_Minus:
       case TokenKind_Bang:
       {
-        lhs                    = arena_alloc_t(p->arena, AstExpr);
-        lhs->tag               = AstExpr_Prefix;
-        lhs->data.prefix.token = p->curr_token;
+        tmp = arena_tmp_begin(p->arena);
+
+        AstExpr *prefix_expr           = arena_alloc_t(p->arena, AstExpr);
+        prefix_expr->tag               = AstExpr_Prefix;
+        prefix_expr->data.prefix.token = p->curr_token;
         parse_advance_token(p);
-        lhs->data.prefix.rhs = parse_expr(p, Precedence_Prefix);
+
+        prefix_expr->data.prefix.rhs = parse_expr(p, Precedence_Prefix);
+        if (prefix_expr->data.prefix.rhs == 0) goto rollback_tmp;
+
+        lhs = prefix_expr;
         break;
       }
 
       case TokenKind_If:
       {
+        tmp = arena_tmp_begin(p->arena);
+
         AstExpr *if_expr;
         Token if_token = p->curr_token;
 
-        if (!parse_expect(p, TokenKind_LParen)) break;
+        if (!parse_expect(p, TokenKind_LParen)) goto rollback_tmp;
         if_expr = arena_alloc_t(p->arena, AstExpr);
         parse_advance_token(p);
         AstExpr *condition = parse_expr(p, Precedence_Lowest);
-        if (condition == 0) break;
-        if (!parse_expect(p, TokenKind_RParen)) break;
+        if (condition == 0) goto rollback_tmp;
+        if (!parse_expect(p, TokenKind_RParen)) goto rollback_tmp;
 
-        if (!parse_expect(p, TokenKind_LBrace)) break;
+        if (!parse_expect(p, TokenKind_LBrace)) goto rollback_tmp;
         AstStmtBlock *consequence = parse_block(p);
 
         AstStmtBlock *alternative = 0;
         if (p->peek_token.kind == TokenKind_Else)
         {
           parse_advance_token(p);
-          if (!parse_expect(p, TokenKind_LBrace)) break;
+          if (!parse_expect(p, TokenKind_LBrace)) goto rollback_tmp;
           alternative = parse_block(p);
         }
 
@@ -1248,15 +1315,17 @@ parse_expr(Parser *p, Precedence precedence)
 
       case TokenKind_Function:
       {
+        tmp = arena_tmp_begin(p->arena);
+
         AstExpr *fn_expr;
         Token fn_token = p->curr_token;
 
-        if (!parse_expect(p, TokenKind_LParen)) break;
+        if (!parse_expect(p, TokenKind_LParen)) goto rollback_tmp;
 
         fn_expr = arena_alloc_t(p->arena, AstExpr);
 
-        AstExprFunctionParam params_sentinel = { 0 };
-        AstExprFunctionParam *params_tail    = &params_sentinel;
+        SLL_BUILDER(AstExprFunctionParam) params;
+        sll_builder_init(params);
 
         if (p->peek_token.kind != TokenKind_RParen)
         {
@@ -1265,8 +1334,7 @@ parse_expr(Parser *p, Precedence precedence)
             AstExprFunctionParam *param = arena_alloc_t(p->arena, AstExprFunctionParam);
             param->identifier.token     = p->curr_token;
 
-            params_tail->next = param;
-            params_tail       = param;
+            sll_builder_append(params, param);
 
             if (p->peek_token.kind == TokenKind_RParen)
             {
@@ -1276,7 +1344,7 @@ parse_expr(Parser *p, Precedence precedence)
 
             if (!parse_expect(p, TokenKind_Comma))
             {
-              break;
+              goto rollback_tmp;
             }
           }
         }
@@ -1285,26 +1353,25 @@ parse_expr(Parser *p, Precedence precedence)
           parse_advance_token(p);
         }
 
-        if (!parse_expect(p, TokenKind_LBrace)) break;
+        if (!parse_expect(p, TokenKind_LBrace)) goto rollback_tmp;
         AstStmtBlock *body = parse_block(p);
 
         lhs                       = fn_expr;
         lhs->tag                  = AstExpr_Function;
         lhs->data.function.token  = fn_token;
-        lhs->data.function.params = params_sentinel.next;
+        lhs->data.function.params = sll_builder_result(params);
         lhs->data.function.body   = body;
         break;
       }
 
       case TokenKind_LParen:
       {
-        parse_advance_token(p);
+        tmp = arena_tmp_begin(p->arena);
 
+        parse_advance_token(p);
         AstExpr *grouped_expr = parse_expr(p, Precedence_Lowest);
-        if (parse_expect(p, TokenKind_RParen))
-        {
-          lhs = grouped_expr;
-        }
+        if (!parse_expect(p, TokenKind_RParen)) goto rollback_tmp;
+        lhs = grouped_expr;
         break;
       }
 
@@ -1315,6 +1382,12 @@ parse_expr(Parser *p, Precedence precedence)
                     str8_va(p->curr_token.value),
                     str8_va(token_name(p->curr_token.kind)));
         return lhs;
+    }
+
+    if (false)
+    {
+    rollback_tmp:
+      arena_tmp_end(tmp);
     }
   }
 
@@ -1356,8 +1429,8 @@ parse_expr(Parser *p, Precedence precedence)
 
         Token call_token = p->curr_token;
 
-        AstExprCallArg args_sentinel = { 0 };
-        AstExprCallArg *args_tail    = &args_sentinel;
+        SLL_BUILDER(AstExprCallArg) args;
+        sll_builder_init(args);
 
         if (p->peek_token.kind != TokenKind_RParen)
         {
@@ -1368,8 +1441,7 @@ parse_expr(Parser *p, Precedence precedence)
             AstExprCallArg *arg = arena_alloc_t(p->arena, AstExprCallArg);
             arg->expr           = parse_expr(p, Precedence_Lowest);
 
-            args_tail->next = arg;
-            args_tail       = arg;
+            sll_builder_append(args, arg);
 
             if (p->peek_token.kind == TokenKind_RParen)
             {
@@ -1392,7 +1464,7 @@ parse_expr(Parser *p, Precedence precedence)
         call->tag                = AstExpr_Call;
         call->data.call.token    = call_token;
         call->data.call.function = lhs;
-        call->data.call.args     = args_sentinel.next;
+        call->data.call.args     = sll_builder_result(args);
 
         lhs = call;
         break;
@@ -1531,22 +1603,21 @@ parse(Str8 input)
   Parser p = { 0 };
   parse_init(&p, input, arena_create(KiB(4)));
 
-  AstStmt sentinel = { 0 };
-  AstStmt *tail    = &sentinel;
+  SLL_BUILDER(AstStmt) stmts;
+  sll_builder_init(stmts);
 
   while (p.curr_token.kind != TokenKind_EOF)
   {
     AstStmt *stmt = parse_stmt(&p);
     if (stmt)
     {
-      tail->next = stmt;
-      tail       = stmt;
+      sll_builder_append(stmts, stmt);
     }
 
     parse_advance_token(&p);
   }
 
-  p.statements = sentinel.next;
+  p.statements = sll_builder_result(stmts);
 
   return p;
 }
@@ -1605,155 +1676,162 @@ eval_inspect(Object const *o, Arena *arena)
     case ObjectKind_Boolean: result = o->data.boolean.value ? KEYWORD_TRUE : KEYWORD_FALSE; break;
     case ObjectKind_Null: result = str8_lit("null"); break;
     default:
-      // TODO(tad): error
+      // TODO(tad): better error
+      result = str8_lit("unsupported object inspection");
       break;
   }
 
   return result;
 }
 
-internal Object const *
-eval_expr(AstExpr *expr, Arena *arena)
-{
-  // TODO(tad): break most of this function into separate functions, probably
-  switch (expr->tag)
-  {
-    case AstExpr_Identifier: break;
-    case AstExpr_Number:
-    {
-      Object *result            = arena_alloc_t(arena, Object);
-      result->tag               = ObjectKind_Number;
-      result->data.number.value = expr->data.number.value;
-      return result;
-    }
+internal Object const *eval_stmt(AstStmt *statements, Arena *arena);
+internal Object const *eval_expr(AstExpr *expr, Arena *arena);
+internal Object const *eval_expr_prefix(AstExprPrefix prefix, Arena *arena);
+internal Object const *eval_expr_infix(AstExprInfix infix, Arena *arena);
+internal Object const *eval_expr_if_else(AstExprIfElse if_else, Arena *arena);
 
-    case AstExpr_Boolean:
+internal Object const *
+object_from_number(s64 value, Arena *arena)
+{
+  Object *result            = arena_alloc_t(arena, Object);
+  result->tag               = ObjectKind_Number;
+  result->data.number.value = value;
+  return result;
+}
+
+internal Object const *
+object_from_bool(b8 value)
+{
+  return value ? OBJECT_TRUE : OBJECT_FALSE;
+}
+
+internal b8
+object_is_truthy(Object const *object)
+{
+  return object != OBJECT_NULL && object != OBJECT_FALSE;
+}
+
+internal Object const *
+eval_expr_prefix(AstExprPrefix prefix, Arena *arena)
+{
+  Object const *result;
+
+  switch (prefix.token.kind)
+  {
+    case TokenKind_Bang:
     {
-      return expr->data.boolean.value ? OBJECT_TRUE : OBJECT_FALSE;
+      TmpArena scratch  = scratch_begin(arena);
+      Object const *rhs = eval_expr(prefix.rhs, scratch.arena);
+      result            = object_from_bool(!object_is_truthy(rhs));
+      scratch_end(scratch);
       break;
     }
 
-    case AstExpr_Prefix:
+    case TokenKind_Minus:
     {
-      switch (expr->data.prefix.token.kind)
-      {
-        case TokenKind_Bang:
-        {
-          // TODO(tad): this should only temporarily be allocated
-          Object const *rhs = eval_expr(expr->data.prefix.rhs, arena);
-
-          if (rhs == OBJECT_FALSE || rhs == OBJECT_NULL)
-          {
-            return OBJECT_TRUE;
-          }
-
-          return OBJECT_FALSE;
-        }
-
-        case TokenKind_Minus:
-        {
-          // TODO(tad): this should only temporarily be allocated
-          Object const *rhs = eval_expr(expr->data.prefix.rhs, arena);
-
-          if (rhs->tag == ObjectKind_Number)
-          {
-            // TODO(tad): can this allocation be avoided?
-            Object *result            = arena_alloc_t(arena, Object);
-            result->tag               = ObjectKind_Number;
-            result->data.number.value = -rhs->data.number.value;
-            return result;
-          }
-
-          return OBJECT_NULL;
-        }
-
-        default: return OBJECT_NULL;
-      }
+      TmpArena scratch  = scratch_begin(arena);
+      Object const *rhs = eval_expr(prefix.rhs, scratch.arena);
+      result = rhs->tag == ObjectKind_Number ? object_from_number(-rhs->data.number.value, arena)
+                                             : OBJECT_NULL;
+      scratch_end(scratch);
+      break;
     }
 
-    case AstExpr_Infix:
+    default: result = OBJECT_NULL; break;
+  }
+
+  return result;
+}
+
+internal Object const *
+eval_expr_infix(AstExprInfix infix, Arena *arena)
+{
+  TmpArena scratch  = scratch_begin(arena);
+  Object const *lhs = eval_expr(infix.lhs, scratch.arena);
+  Object const *rhs = eval_expr(infix.rhs, scratch.arena);
+
+  Object const *result;
+
+  if (lhs->tag == ObjectKind_Number && rhs->tag == ObjectKind_Number)
+  {
+    switch (infix.token.kind)
     {
-      // TODO(tad): this should only temporarily be allocated
-      Object const *lhs = eval_expr(expr->data.infix.lhs, arena);
-      Object const *rhs = eval_expr(expr->data.infix.rhs, arena);
-
-      if (lhs->tag == ObjectKind_Number && rhs->tag == ObjectKind_Number)
-      {
-        Object *result = arena_alloc_t(arena, Object);
-
-        switch (expr->data.infix.token.kind)
-        {
-          case TokenKind_Plus:
-          {
-            result->data.number.value = lhs->data.number.value + rhs->data.number.value;
-            result->tag               = ObjectKind_Number;
-            break;
-          }
-          case TokenKind_Minus:
-          {
-            result->data.number.value = lhs->data.number.value - rhs->data.number.value;
-            result->tag               = ObjectKind_Number;
-            break;
-          }
-          case TokenKind_Star:
-          {
-            result->data.number.value = lhs->data.number.value * rhs->data.number.value;
-            result->tag               = ObjectKind_Number;
-            break;
-          }
-          case TokenKind_Slash:
-          {
-            result->data.number.value = lhs->data.number.value / rhs->data.number.value;
-            result->tag               = ObjectKind_Number;
-            break;
-          }
-          case TokenKind_Less:
-          {
-            return lhs->data.number.value < rhs->data.number.value ? OBJECT_TRUE : OBJECT_FALSE;
-          }
-          case TokenKind_Greater:
-          {
-            return lhs->data.number.value > rhs->data.number.value ? OBJECT_TRUE : OBJECT_FALSE;
-          }
-          case TokenKind_Equal:
-          {
-            return lhs->data.number.value == rhs->data.number.value ? OBJECT_TRUE : OBJECT_FALSE;
-          }
-          case TokenKind_NotEqual:
-          {
-            return lhs->data.number.value != rhs->data.number.value ? OBJECT_TRUE : OBJECT_FALSE;
-          }
-
-          default: return OBJECT_NULL;
-        }
-
-        return result;
-      }
-
-      switch (expr->data.infix.token.kind)
-      {
-        case TokenKind_Less:
-        {
-          return lhs < rhs ? OBJECT_TRUE : OBJECT_FALSE;
-        }
-        case TokenKind_Greater:
-        {
-          return lhs > rhs ? OBJECT_TRUE : OBJECT_FALSE;
-        }
-        case TokenKind_Equal:
-        {
-          return lhs == rhs ? OBJECT_TRUE : OBJECT_FALSE;
-        }
-        case TokenKind_NotEqual:
-        {
-          return lhs != rhs ? OBJECT_TRUE : OBJECT_FALSE;
-        }
-
-        default: return OBJECT_NULL;
-      }
+      case TokenKind_Plus:
+        result = object_from_number(lhs->data.number.value + rhs->data.number.value, arena);
+        break;
+      case TokenKind_Minus:
+        result = object_from_number(lhs->data.number.value - rhs->data.number.value, arena);
+        break;
+      case TokenKind_Star:
+        result = object_from_number(lhs->data.number.value * rhs->data.number.value, arena);
+        break;
+      case TokenKind_Slash:
+        result = object_from_number(lhs->data.number.value / rhs->data.number.value, arena);
+        break;
+      case TokenKind_Less:
+        result = object_from_bool(lhs->data.number.value < rhs->data.number.value);
+        break;
+      case TokenKind_Greater:
+        result = object_from_bool(lhs->data.number.value > rhs->data.number.value);
+        break;
+      case TokenKind_Equal:
+        result = object_from_bool(lhs->data.number.value == rhs->data.number.value);
+        break;
+      case TokenKind_NotEqual:
+        result = object_from_bool(lhs->data.number.value != rhs->data.number.value);
+        break;
+      default: result = OBJECT_NULL; break;
     }
+  }
+  else
+  {
+    switch (infix.token.kind)
+    {
+      case TokenKind_Equal: result = object_from_bool(lhs == rhs); break;
+      case TokenKind_NotEqual: result = object_from_bool(lhs != rhs); break;
+      default: result = OBJECT_NULL; break;
+    }
+  }
 
-    case AstExpr_IfElse: break;
+  scratch_end(scratch);
+
+  return result;
+}
+
+internal Object const *
+eval_expr_if_else(AstExprIfElse if_else, Arena *arena)
+{
+  TmpArena scratch = scratch_begin(arena);
+  b8 condition     = object_is_truthy(eval_expr(if_else.condition, scratch.arena));
+  scratch_end(scratch);
+
+  if (condition)
+  {
+    return eval_stmt(if_else.consequence->statements, arena);
+  }
+  else if (if_else.alternative != 0)
+  {
+    return eval_stmt(if_else.alternative->statements, arena);
+  }
+  else
+  {
+    return OBJECT_NULL;
+  }
+}
+
+internal Object const *
+eval_expr(AstExpr *expr, Arena *arena)
+{
+  switch (expr->tag)
+  {
+    case AstExpr_Identifier: break;
+
+    case AstExpr_Number: return object_from_number(expr->data.number.value, arena);
+    case AstExpr_Boolean: return object_from_bool(expr->data.boolean.value);
+    case AstExpr_Prefix: return eval_expr_prefix(expr->data.prefix, arena);
+    case AstExpr_Infix: return eval_expr_infix(expr->data.infix, arena);
+    case AstExpr_IfElse: return eval_expr_if_else(expr->data.if_else, arena);
+
     case AstExpr_Function: break;
     case AstExpr_Call: break;
     default:
@@ -1945,10 +2023,9 @@ repl(void)
 
     if (p.message_list.level < MessageLevel_Error)
     {
-      Arena *a             = arena_tl_get();
-      TmpArena t           = arena_tmp_begin(a);
+      TmpArena t           = scratch_begin(0);
       Object const *result = eval_stmt(p.statements, p.arena);
-      printf("%.*s\n", str8_va(eval_inspect(result, a)));
+      printf("%.*s\n", str8_va(eval_inspect(result, t.arena)));
       arena_tmp_end(t);
     }
 
@@ -3039,6 +3116,55 @@ test_eval_bang(void)
 }
 
 internal int
+test_eval_if_else_expr(void)
+{
+  struct
+  {
+    Str8 input;
+    b8 is_null;
+    union
+    {
+      s64 num;
+      Object const *nul;
+    } expected;
+  } tests[] = {
+    { str8_lit("if (true) { 10 }"), .expected = { 10 } },
+    { str8_lit("if (false) { 10 }"), .is_null = true, .expected = { .nul = OBJECT_NULL } },
+    { str8_lit("if (1) { 10 }"), .expected = { 10 } },
+    { str8_lit("if (1 < 2) { 10 }"), .expected = { 10 } },
+    { str8_lit("if (1 > 2) { 10 }"), .is_null = true, .expected = { .nul = OBJECT_NULL } },
+    { str8_lit("if (1 > 2) { 10 } else { 20 }"), .expected = { 20 } },
+    { str8_lit("if (1 < 2) { 10 } else { 20 }"), .expected = { 10 } },
+  };
+
+  for (usize i = 0; i < arr_count(tests); i++)
+  {
+    Parser p = parse(tests[i].input);
+    test_helper(test_parse_check_messages(&p));
+
+    Object const *result = eval_stmt(p.statements, p.arena);
+    if (!tests[i].is_null)
+    {
+      test_assert_m(result->tag == ObjectKind_Number, "expected number object");
+      test_assert_m(result->data.number.value == tests[i].expected.num,
+                    "expected number value '%lld', evaluated '%lld'",
+                    tests[i].expected.num,
+                    result->data.number.value);
+    }
+    else
+    {
+      test_assert_m(result->tag == ObjectKind_Null, "expected null");
+      test_assert_m(result == tests[i].expected.nul,
+                    "expected null but evaluated to different reference");
+    }
+
+    parse_free(&p);
+  }
+
+  return 0;
+}
+
+internal int
 test(void)
 {
   int result = 0;
@@ -3065,6 +3191,7 @@ test(void)
   result += test_eval_number_expr();
   result += test_eval_boolean_expr();
   result += test_eval_bang();
+  result += test_eval_if_else_expr();
 
   return result;
 }
