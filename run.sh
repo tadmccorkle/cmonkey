@@ -1,18 +1,31 @@
 #!/bin/sh
 
-CPROG_DIR="$(dirname $0)"
+SRC_DIR="$(dirname $0)"
+BIN_NAME="cmonkey"
+
+BUILD_FLAGS="-Wno-gnu-zero-variadic-macro-arguments"
+LINT_STRICT_FLAGS="$BUILD_FLAGS -Wno-declaration-after-statement -Wno-pre-c11-compat -Wno-padded"
+LINT_LAX_FLAGS="$LINT_STRICT_FLAGS -Wno-unused-macros -Wno-switch-enum -Wno-poison-system-directories"
+
+slint() {
+	clang $SRC_DIR/src/main.c -fsyntax-only -Weverything $LINT_STRICT_FLAGS "$@"
+}
+
+lint() {
+	clang $SRC_DIR/src/main.c -fsyntax-only -Weverything $LINT_LAX_FLAGS "$@"
+}
 
 build() {
-	mkdir -p $CPROG_DIR/bin
-	clang $CPROG_DIR/src/main.c -Wall -Wextra -o $CPROG_DIR/bin/prog "$@"
+	mkdir -p $SRC_DIR/bin
+	clang $SRC_DIR/src/main.c -Wall -Wextra -Wpedantic $BUILD_FLAGS -o $SRC_DIR/bin/$BIN_NAME "$@"
 }
 
 clean() {
-	rm -rf $CPROG_DIR/bin
+	rm -rf $SRC_DIR/bin
 }
 
 run() {
-	build && $CPROG_DIR/bin/prog "$@"
+	build && $SRC_DIR/bin/$BIN_NAME "$@"
 }
 
 # _completions() {
@@ -30,11 +43,11 @@ run() {
 # }
 
 case "${1:-}" in
-	build|clean|run)
+	build|lint|slint|clean|run)
 		"$@"
 		;;
 	--version)
-		echo "cinterpreter run.sh version 1.0.0"
+		echo "cmonkey run.sh version 1.0.0"
 		;;
 	*)
 		run "$@"

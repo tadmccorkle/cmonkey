@@ -61,6 +61,12 @@ typedef b8 bool;
 #  include <stdbool.h>
 #endif
 
+#if defined(__GNUC__) || defined(__clang__)
+#  define ATTRIB_FMT(fmt_idx, args_idx) __attribute__((format(printf, fmt_idx, args_idx)))
+#else
+#  define ATTRIB_FMT(fmt_idx, args_idx)
+#endif
+
 ////////////////////////////////////////////////////////////////////////////////
 // ll
 
@@ -294,7 +300,7 @@ scratch_begin(Arena *conflict)
     }
   }
 
-  assert(!"No non-conflicting scratch arena available.");
+  assert(0 && "No non-conflicting scratch arena available.");
   return (TmpArena){ 0 };
 }
 
@@ -313,7 +319,7 @@ cstr_length(char const *c)
 {
   char const *p = c;
   for (; *p != 0; p++);
-  return (p - c);
+  return (usize)(p - c);
 }
 
 typedef struct Str8 Str8;
@@ -333,12 +339,22 @@ str8(u8 const *value, usize length)
   return (Str8){ value, length };
 }
 
+internal Str8 str8_fv(Arena *arena, char const *fmt, va_list args) ATTRIB_FMT(2, 0);
+internal Str8 str8_f(Arena *arena, char const *fmt, ...) ATTRIB_FMT(2, 3);
+
 internal Str8
 str8_fv(Arena *arena, char const *fmt, va_list args)
 {
   va_list args2;
   va_copy(args2, args);
-  usize len = vsnprintf(0, 0, fmt, args);
+  int required_len = vsnprintf(0, 0, fmt, args);
+  if (required_len < 0)
+  {
+    // TODO(tad): Handle failure? Return zero Str8?
+    assert(0 && "Failed to determine required length for formatted Str8.");
+    return (Str8){ 0 };
+  }
+  usize len = (usize)required_len;
   char *buf = arena_alloc_tn_nz(arena, char, len + 1);
   vsnprintf(buf, len + 1, fmt, args2);
   buf[len] = 0;
@@ -359,7 +375,7 @@ str8_f(Arena *arena, char const *fmt, ...)
 internal Str8
 str8_from_cstr(char const *c)
 {
-  return str8((u8 *)c, cstr_length(c));
+  return str8((u8 const *)c, cstr_length(c));
 }
 
 internal b32
@@ -418,12 +434,22 @@ str8_append(StrBuilder8 *builder, Str8 value)
 
 #define str8_append_lit(builder, value) str8_append((builder), str8_lit(value))
 
+internal void str8_append_fv(StrBuilder8 *builder, char const *fmt, va_list args) ATTRIB_FMT(2, 0);
+internal void str8_append_f(StrBuilder8 *builder, char const *fmt, ...) ATTRIB_FMT(2, 3);
+
 internal void
 str8_append_fv(StrBuilder8 *builder, char const *fmt, va_list args)
 {
   va_list args2;
   va_copy(args2, args);
-  usize append_len = vsnprintf(0, 0, fmt, args);
+  int required_len = vsnprintf(0, 0, fmt, args);
+  if (required_len < 0)
+  {
+    // TODO(tad): Handle failure? Append nothing or token value?
+    assert(0 && "Failed to determine required length for Str8 append value.");
+    return;
+  }
+  usize append_len = (usize)required_len;
   str8_ensure_capacity(builder, builder->len + append_len + 1);
   vsnprintf((char *)builder->buf + builder->len, append_len + 1, fmt, args2);
   builder->len += append_len;
@@ -548,8 +574,8 @@ token_name(TokenKind kind)
 typedef struct Token Token;
 struct Token
 {
-  Str8 value;
   TokenKind kind;
+  Str8 value;
 };
 
 internal const Str8 KEYWORD_FUNCTION = str8_lit("fn");
@@ -561,13 +587,13 @@ internal const Str8 KEYWORD_ELSE     = str8_lit("else");
 internal const Str8 KEYWORD_RETURN   = str8_lit("return");
 
 internal Token keyword_tokens[] = {
-  { KEYWORD_FUNCTION, TokenKind_Function },
-  { KEYWORD_LET, TokenKind_Let },
-  { KEYWORD_TRUE, TokenKind_True },
-  { KEYWORD_FALSE, TokenKind_False },
-  { KEYWORD_IF, TokenKind_If },
-  { KEYWORD_ELSE, TokenKind_Else },
-  { KEYWORD_RETURN, TokenKind_Return },
+  { TokenKind_Function, KEYWORD_FUNCTION },
+  { TokenKind_Let, KEYWORD_LET },
+  { TokenKind_True, KEYWORD_TRUE },
+  { TokenKind_False, KEYWORD_FALSE },
+  { TokenKind_If, KEYWORD_IF },
+  { TokenKind_Else, KEYWORD_ELSE },
+  { TokenKind_Return, KEYWORD_RETURN },
 };
 
 typedef struct Lexer Lexer;
@@ -720,7 +746,7 @@ lex_print(Str8 input)
   do
   {
     lex_advance_token(&l, &token);
-    printf("%2d %-30.*s %.*s\n", token.kind, str8_va(token_name(token.kind)), str8_va(token.value));
+    printf("%2u %-30.*s %.*s\n", token.kind, str8_va(token_name(token.kind)), str8_va(token.value));
   } while (token.kind != TokenKind_EOF);
 }
 
@@ -1078,6 +1104,8 @@ parse_print_messages(Parser *p)
     printf("%.*s\n", str8_va(m->value));
   }
 }
+
+internal void parse_error(Parser *p, MessageLevel level, char const *fmt, ...) ATTRIB_FMT(3, 4);
 
 internal void
 parse_error(Parser *p, MessageLevel level, char const *fmt, ...)
@@ -1578,14 +1606,20 @@ parse_stmt(Parser *p)
     {
       for (usize i = 0; i < p->curr_token.value.len; i++)
       {
-        u8 c      = p->curr_token.value.buf[i];
-        char *fmt = c >= 32 && c <= 126 ? "Illegal token: %c" : "Illegal unprintable token: \\x%X";
-        parse_error(p, MessageLevel_Error, fmt, c);
+        u8 c = p->curr_token.value.buf[i];
+        if (c >= 32 && c <= 126)
+        {
+          parse_error(p, MessageLevel_Error, "Illegal token: %c", c);
+        }
+        else
+        {
+          parse_error(p, MessageLevel_Error, "Illegal unprintable token: \\x%X", c);
+        }
       }
       break;
     }
-    case TokenKind_EOF: assert(!"EOF tokens are checked by outer loop condition."); break;
-    default: assert(!"Tokenizer produced invalid token."); break;
+    case TokenKind_EOF: assert(0 && "EOF tokens are checked by outer loop condition."); break;
+    default: assert(0 && "Tokenizer produced invalid token."); break;
   }
 
   return stmt;
@@ -1651,6 +1685,7 @@ struct ObjectBoolean
 typedef struct ObjectNull ObjectNull;
 struct ObjectNull
 {
+  u8 unused_;
 };
 
 typedef struct ObjectReturn ObjectReturn;
@@ -1683,6 +1718,7 @@ eval_inspect(Object const *o, Arena *arena)
   {
     case ObjectKind_Number: result = str8_f(arena, "%lld", o->data.number.value); break;
     case ObjectKind_Boolean: result = o->data.boolean.value ? KEYWORD_TRUE : KEYWORD_FALSE; break;
+    case ObjectKind_Return: result = eval_inspect(o->data.ret.value, arena); break;
     case ObjectKind_Null: result = str8_lit("null"); break;
     default:
       // TODO(tad): better error
@@ -2135,7 +2171,7 @@ test_lex(void)
                         "@\n"
                         "");
 
-#define test_result(kind, literal) { str8_lit(literal), kind }
+#define test_result(kind, literal) { kind, str8_lit(literal) }
   Token test_results[] = {
     test_result(TokenKind_Let, "let"),        test_result(TokenKind_Identifier, "five"),
     test_result(TokenKind_Assign, "="),       test_result(TokenKind_Number, "5"),
@@ -2771,7 +2807,7 @@ test_parse_expr_function_params(void)
     usize expected_count;
     Str8 expected_params[3];
   } tests[] = {
-    { str8_lit("fn(){}"), 0, {} },
+    { str8_lit("fn(){}"), 0, { 0 } },
     { str8_lit("fn(x){}"), 1, { str8_lit("x") } },
     { str8_lit("fn(x,y,z){}"), 3, { str8_lit("x"), str8_lit("y"), str8_lit("z") } },
   };
@@ -2869,7 +2905,7 @@ test_parse_expr_call_args(void)
     usize expected_count;
     ExpectedLitExpr expected_args[3];
   } tests[] = {
-    { str8_lit("call();"), 0, {} },
+    { str8_lit("call();"), 0, { 0 } },
     { str8_lit("call(1);"), 1, { expected_lit(AstExpr_Number, s64, 1) } },
     {
       str8_lit("call(1,val,false);"),
