@@ -512,47 +512,47 @@ is_letter(u8 ch)
 
 // TODO(tad): Use ASCII values for corresponding token kind values?
 #define TOKEN_KINDS(X)         \
-  X(TokenKind_Illegal)         \
-  X(TokenKind_EOF)             \
+  X(Illegal)                   \
+  X(EOF)                       \
                                \
   /* identifiers & literals */ \
-  X(TokenKind_Identifier)      \
-  X(TokenKind_Number)          \
+  X(Identifier)                \
+  X(Number)                    \
                                \
   /* operators */              \
-  X(TokenKind_Assign)          \
-  X(TokenKind_Plus)            \
-  X(TokenKind_Minus)           \
-  X(TokenKind_Bang)            \
-  X(TokenKind_Star)            \
-  X(TokenKind_Slash)           \
-  X(TokenKind_Less)            \
-  X(TokenKind_Greater)         \
-  X(TokenKind_Equal)           \
-  X(TokenKind_NotEqual)        \
+  X(Assign)                    \
+  X(Plus)                      \
+  X(Minus)                     \
+  X(Bang)                      \
+  X(Star)                      \
+  X(Slash)                     \
+  X(Less)                      \
+  X(Greater)                   \
+  X(Equal)                     \
+  X(NotEqual)                  \
                                \
   /* delimiters */             \
-  X(TokenKind_Comma)           \
-  X(TokenKind_Semicolon)       \
-  X(TokenKind_LParen)          \
-  X(TokenKind_RParen)          \
-  X(TokenKind_LBrace)          \
-  X(TokenKind_RBrace)          \
-  X(TokenKind_LBracket)        \
-  X(TokenKind_RBracket)        \
+  X(Comma)                     \
+  X(Semicolon)                 \
+  X(LParen)                    \
+  X(RParen)                    \
+  X(LBrace)                    \
+  X(RBrace)                    \
+  X(LBracket)                  \
+  X(RBracket)                  \
                                \
   /* keywords */               \
-  X(TokenKind_Function)        \
-  X(TokenKind_Let)             \
-  X(TokenKind_True)            \
-  X(TokenKind_False)           \
-  X(TokenKind_If)              \
-  X(TokenKind_Else)            \
-  X(TokenKind_Return)
+  X(Function)                  \
+  X(Let)                       \
+  X(True)                      \
+  X(False)                     \
+  X(If)                        \
+  X(Else)                      \
+  X(Return)
 
 typedef enum
 {
-#define TOKEN_KIND(name) name,
+#define TOKEN_KIND(name) TokenKind_##name,
   TOKEN_KINDS(TOKEN_KIND)
 #undef TOKEN_KIND
   TokenKind_COUNT
@@ -564,7 +564,7 @@ token_name(TokenKind kind)
   switch (kind)
   {
 #define TOKEN_KIND(name) \
-  case name: return str8_lit(#name);
+  case TokenKind_##name: return str8_lit(#name);
     TOKEN_KINDS(TOKEN_KIND)
 #undef TOKEN_KIND
     default: return str8_lit("Unknown Token Kind");
@@ -742,11 +742,11 @@ lex_print(Str8 input)
   Token token = { 0 };
   lex_init(&l, input);
 
-  printf("id %-30s %s\n", "token", "value");
+  printf("id %-15s %s\n", "token", "value");
   do
   {
     lex_advance_token(&l, &token);
-    printf("%2u %-30.*s %.*s\n", token.kind, str8_va(token_name(token.kind)), str8_va(token.value));
+    printf("%2u %-15.*s %.*s\n", token.kind, str8_va(token_name(token.kind)), str8_va(token.value));
   } while (token.kind != TokenKind_EOF);
 }
 
@@ -763,6 +763,21 @@ typedef enum
   MessageLevel_Critical,
   MessageLevel_COUNT
 } MessageLevel;
+
+internal Str8
+message_level_name(MessageLevel level)
+{
+  switch (level)
+  {
+    case MessageLevel_None: return (Str8){ 0 };
+    case MessageLevel_Trace: return str8_lit("TRACE");
+    case MessageLevel_Info: return str8_lit("INFO");
+    case MessageLevel_Warn: return str8_lit("WARNING");
+    case MessageLevel_Error: return str8_lit("ERROR");
+    case MessageLevel_Critical: return str8_lit("CRITICAL");
+    default: return str8_lit("Unknown Message Level");
+  }
+}
 
 typedef struct Message Message;
 struct Message
@@ -794,21 +809,36 @@ typedef enum
   Precedence_COUNT
 } Precedence;
 
-// TODO(tad): Build expression and statement kinds with macro to support forward declarations,
-// pretty-printing, etc.
+#define AST_EXPR_KINDS(X) \
+  X(Identifier)           \
+  X(Number)               \
+  X(Boolean)              \
+  X(Prefix)               \
+  X(Infix)                \
+  X(IfElse)               \
+  X(Function)             \
+  X(Call)
 
 typedef enum
 {
-  AstExpr_Identifier,
-  AstExpr_Number,
-  AstExpr_Boolean,
-  AstExpr_Prefix,
-  AstExpr_Infix,
-  AstExpr_IfElse,
-  AstExpr_Function,
-  AstExpr_Call,
-  AstExpr_COUNT,
+#define AST_EXPR_KIND(name) AstExpr_##name,
+  AST_EXPR_KINDS(AST_EXPR_KIND)
+#undef AST_EXPR_KIND
+  AstExpr_COUNT
 } AstExprKind;
+
+internal Str8
+ast_expr_name(AstExprKind kind)
+{
+  switch (kind)
+  {
+#define AST_EXPR_KIND(name) \
+  case AstExpr_##name: return str8_lit(#name);
+    AST_EXPR_KINDS(AST_EXPR_KIND)
+#undef AST_EXPR_KIND
+    default: return str8_lit("Unknown AST Expression Kind");
+  }
+}
 
 typedef struct AstStmt AstStmt;
 typedef struct AstExpr AstExpr;
@@ -915,8 +945,30 @@ typedef enum
   AstStmt_Let,
   AstStmt_Ret,
   AstStmt_Expr,
-  AstStmt_COUNT,
+  AstStmt_COUNT
 } AstStmtKind;
+
+typedef struct AstStmtLet AstStmtLet;
+struct AstStmtLet
+{
+  Token token;
+  AstExprIdentifier *identifier;
+  AstExpr *expr;
+};
+
+typedef struct AstStmtReturn AstStmtReturn;
+struct AstStmtReturn
+{
+  Token token;
+  AstExpr *expr;
+};
+
+typedef struct AstStmtExpr AstStmtExpr;
+struct AstStmtExpr
+{
+  Token token;
+  AstExpr *expr;
+};
 
 struct AstStmt
 {
@@ -925,22 +977,9 @@ struct AstStmt
   AstStmtKind tag;
   union
   {
-    struct Let
-    {
-      Token token;
-      AstExprIdentifier *identifier;
-      AstExpr *expr;
-    } let;
-    struct Return
-    {
-      Token token;
-      AstExpr *expr;
-    } ret;
-    struct Expr
-    {
-      Token token;
-      AstExpr *expr;
-    } expr;
+    AstStmtLet let;
+    AstStmtReturn ret;
+    AstStmtExpr expr;
   } data;
 };
 
@@ -1100,23 +1139,16 @@ parse_print_messages(Parser *p)
 {
   for (Message *m = p->message_list.first; m != 0; m = m->next)
   {
-    // TODO(tad): print error level
-    printf("%.*s\n", str8_va(m->value));
+    printf("[%.*s] %.*s\n", str8_va(message_level_name(m->level)), str8_va(m->value));
   }
 }
 
-internal void parse_error(Parser *p, MessageLevel level, char const *fmt, ...) ATTRIB_FMT(3, 4);
-
 internal void
-parse_error(Parser *p, MessageLevel level, char const *fmt, ...)
+parse_error(Parser *p, MessageLevel level, Str8 message)
 {
   Message *m = arena_alloc_t(p->arena, Message);
   m->level   = level;
-
-  va_list args;
-  va_start(args, fmt);
-  m->value = str8_fv(p->arena, fmt, args);
-  va_end(args);
+  m->value   = message;
 
   if (p->message_list.level < level)
   {
@@ -1153,11 +1185,11 @@ parse_expect(Parser *p, TokenKind kind)
   }
   else
   {
-    parse_error(p,
-                MessageLevel_Error,
-                "Expected token '%.*s' but parsed '%.*s'.",
-                str8_va(token_name(kind)),
-                str8_va(token_name(p->peek_token.kind)));
+    Str8 error = str8_f(p->arena,
+                        "Expected token '%.*s' but parsed '%.*s'.",
+                        str8_va(token_name(kind)),
+                        str8_va(token_name(p->peek_token.kind)));
+    parse_error(p, MessageLevel_Error, error);
     return false;
   }
 }
@@ -1215,7 +1247,7 @@ parse_block(Parser *p)
 
   if (p->curr_token.kind == TokenKind_EOF)
   {
-    parse_error(p, MessageLevel_Error, "Block reached EOF before closing '}'.");
+    parse_error(p, MessageLevel_Error, str8_lit("Block reached EOF before closing '}'."));
   }
 
   return block;
@@ -1258,17 +1290,15 @@ parse_expr(Parser *p, Precedence precedence)
 
         if (errno == ERANGE)
         {
-          parse_error(p,
-                      MessageLevel_Error,
-                      "'%.*s' is not a number literal.",
-                      str8_va(p->curr_token.value));
+          Str8 error =
+          str8_f(p->arena, "'%.*s' is not a number literal.", str8_va(p->curr_token.value));
+          parse_error(p, MessageLevel_Error, error);
         }
         else if (end == (char *)buf)
         {
-          parse_error(p,
-                      MessageLevel_Error,
-                      "Number literal '%.*s' is out of range.",
-                      str8_va(p->curr_token.value));
+          Str8 error =
+          str8_f(p->arena, "Number literal '%.*s' is out of range.", str8_va(p->curr_token.value));
+          parse_error(p, MessageLevel_Error, error);
         }
         else
         {
@@ -1404,12 +1434,14 @@ parse_expr(Parser *p, Precedence precedence)
       }
 
       default:
-        parse_error(p,
-                    MessageLevel_Error,
-                    "'%.*s' (type '%.*s') is not a valid prefix token.",
-                    str8_va(p->curr_token.value),
-                    str8_va(token_name(p->curr_token.kind)));
+      {
+        Str8 error = str8_f(p->arena,
+                            "'%.*s' (type '%.*s') is not a valid prefix token.",
+                            str8_va(p->curr_token.value),
+                            str8_va(token_name(p->curr_token.kind)));
+        parse_error(p, MessageLevel_Error, error);
         return lhs;
+      }
     }
 
     if (false)
@@ -1606,15 +1638,10 @@ parse_stmt(Parser *p)
     {
       for (usize i = 0; i < p->curr_token.value.len; i++)
       {
-        u8 c = p->curr_token.value.buf[i];
-        if (c >= 32 && c <= 126)
-        {
-          parse_error(p, MessageLevel_Error, "Illegal token: %c", c);
-        }
-        else
-        {
-          parse_error(p, MessageLevel_Error, "Illegal unprintable token: \\x%X", c);
-        }
+        u8 c       = p->curr_token.value.buf[i];
+        Str8 error = c >= 32 && c <= 126 ? str8_f(p->arena, "Illegal token: %c", c)
+                                         : str8_f(p->arena, "Illegal unprintable token: \\x%X", c);
+        parse_error(p, MessageLevel_Error, error);
       }
       break;
     }
@@ -1659,14 +1686,33 @@ parse(Str8 input)
 ////////////////////////////////////////////////////////////////////////////////
 // eval
 
+#define OBJECT_KINDS(X) \
+  X(Number)             \
+  X(Boolean)            \
+  X(Null)               \
+  X(Return)             \
+  X(Error)
+
 typedef enum
 {
-  ObjectKind_Number,
-  ObjectKind_Boolean,
-  ObjectKind_Null,
-  ObjectKind_Return,
+#define OBJECT_KIND(name) ObjectKind_##name,
+  OBJECT_KINDS(OBJECT_KIND)
+#undef OBJECT_KIND
   ObjectKind_COUNT
 } ObjectKind;
+
+internal Str8
+object_name(ObjectKind kind)
+{
+  switch (kind)
+  {
+#define OBJECT_KIND(name) \
+  case ObjectKind_##name: return str8_lit(#name);
+    OBJECT_KINDS(OBJECT_KIND)
+#undef OBJECT_KIND
+    default: return str8_lit("Unknown Object Kind");
+  }
+}
 
 typedef struct Object Object;
 
@@ -1694,6 +1740,12 @@ struct ObjectReturn
   Object const *value;
 };
 
+typedef struct ObjectError ObjectError;
+struct ObjectError
+{
+  Str8 value;
+};
+
 struct Object
 {
   ObjectKind tag;
@@ -1703,6 +1755,7 @@ struct Object
     ObjectBoolean boolean;
     ObjectReturn ret;
     ObjectNull null;
+    ObjectError err;
   } data;
 };
 
@@ -1713,20 +1766,16 @@ internal Object const *OBJECT_NULL  = &(Object){ ObjectKind_Null, { 0 } };
 internal Str8
 eval_inspect(Object const *o, Arena *arena)
 {
-  Str8 result = { 0 };
   switch (o->tag)
   {
-    case ObjectKind_Number: result = str8_f(arena, "%lld", o->data.number.value); break;
-    case ObjectKind_Boolean: result = o->data.boolean.value ? KEYWORD_TRUE : KEYWORD_FALSE; break;
-    case ObjectKind_Return: result = eval_inspect(o->data.ret.value, arena); break;
-    case ObjectKind_Null: result = str8_lit("null"); break;
+    case ObjectKind_Number: return str8_f(arena, "%lld", o->data.number.value);
+    case ObjectKind_Boolean: return o->data.boolean.value ? KEYWORD_TRUE : KEYWORD_FALSE;
+    case ObjectKind_Return: return eval_inspect(o->data.ret.value, arena);
+    case ObjectKind_Null: return str8_lit("null");
+    case ObjectKind_Error: return str8_f(arena, "Error: %.*s", str8_va(o->data.err.value));
     default:
-      // TODO(tad): better error
-      result = str8_lit("unsupported object inspection");
-      break;
+      return str8_f(arena, "unsupported object inspection: %.*s", str8_va(object_name(o->tag)));
   }
-
-  return result;
 }
 
 internal Object const *eval_program(AstStmt *statements, Arena *arena);
@@ -1746,9 +1795,24 @@ object_from_number(s64 value, Arena *arena)
 }
 
 internal Object const *
+object_from_error(Str8 error, Arena *arena)
+{
+  Object *result         = arena_alloc_t(arena, Object);
+  result->tag            = ObjectKind_Error;
+  result->data.err.value = error;
+  return result;
+}
+
+internal Object const *
 object_from_bool(b8 value)
 {
   return value ? OBJECT_TRUE : OBJECT_FALSE;
+}
+
+internal b8
+object_is_error(Object const *object)
+{
+  return object->tag == ObjectKind_Error;
 }
 
 internal b8
@@ -1768,7 +1832,14 @@ eval_expr_prefix(AstExprPrefix prefix, Arena *arena)
     {
       TmpArena scratch  = scratch_begin(arena);
       Object const *rhs = eval_expr(prefix.rhs, scratch.arena);
-      result            = object_from_bool(!object_is_truthy(rhs));
+      if (object_is_error(rhs))
+      {
+        result = object_from_error(rhs->data.err.value, arena);
+      }
+      else
+      {
+        result = object_from_bool(!object_is_truthy(rhs));
+      }
       scratch_end(scratch);
       break;
     }
@@ -1777,13 +1848,31 @@ eval_expr_prefix(AstExprPrefix prefix, Arena *arena)
     {
       TmpArena scratch  = scratch_begin(arena);
       Object const *rhs = eval_expr(prefix.rhs, scratch.arena);
-      result = rhs->tag == ObjectKind_Number ? object_from_number(-rhs->data.number.value, arena)
-                                             : OBJECT_NULL;
+      if (object_is_error(rhs))
+      {
+        result = object_from_error(rhs->data.err.value, arena);
+      }
+      else if (rhs->tag != ObjectKind_Number)
+      {
+        Str8 error = str8_f(arena, "unknown operator: -%.*s", str8_va(object_name(rhs->tag)));
+        result     = object_from_error(error, arena);
+      }
+      else
+      {
+        result = object_from_number(-rhs->data.number.value, arena);
+      }
       scratch_end(scratch);
       break;
     }
 
-    default: result = OBJECT_NULL; break;
+    default:
+    {
+      Str8 error = str8_f(arena,
+                          "unknown operator: %.*s%.*s",
+                          str8_va(prefix.token.value),
+                          str8_va(ast_expr_name(prefix.rhs->tag)));
+      result     = object_from_error(error, arena);
+    }
   }
 
   return result;
@@ -1798,7 +1887,15 @@ eval_expr_infix(AstExprInfix infix, Arena *arena)
 
   Object const *result;
 
-  if (lhs->tag == ObjectKind_Number && rhs->tag == ObjectKind_Number)
+  if (object_is_error(lhs))
+  {
+    result = object_from_error(lhs->data.err.value, arena);
+  }
+  else if (object_is_error(rhs))
+  {
+    result = object_from_error(rhs->data.err.value, arena);
+  }
+  else if (lhs->tag == ObjectKind_Number && rhs->tag == ObjectKind_Number)
   {
     switch (infix.token.kind)
     {
@@ -1826,7 +1923,16 @@ eval_expr_infix(AstExprInfix infix, Arena *arena)
       case TokenKind_NotEqual:
         result = object_from_bool(lhs->data.number.value != rhs->data.number.value);
         break;
-      default: result = OBJECT_NULL; break;
+      default:
+      {
+        Str8 error = str8_f(arena,
+                            "unknown operator: %.*s %.*s %.*s",
+                            str8_va(object_name(lhs->tag)),
+                            str8_va(infix.token.value),
+                            str8_va(object_name(rhs->tag)));
+        result     = object_from_error(error, arena);
+        break;
+      }
     }
   }
   else
@@ -1835,7 +1941,28 @@ eval_expr_infix(AstExprInfix infix, Arena *arena)
     {
       case TokenKind_Equal: result = object_from_bool(lhs == rhs); break;
       case TokenKind_NotEqual: result = object_from_bool(lhs != rhs); break;
-      default: result = OBJECT_NULL; break;
+      default:
+      {
+        Str8 error;
+        if (lhs->tag == rhs->tag)
+        {
+          error = str8_f(arena,
+                         "unknown operator: %.*s %.*s %.*s",
+                         str8_va(object_name(lhs->tag)),
+                         str8_va(infix.token.value),
+                         str8_va(object_name(rhs->tag)));
+        }
+        else
+        {
+          error = str8_f(arena,
+                         "type mismatch: %.*s %.*s %.*s",
+                         str8_va(object_name(lhs->tag)),
+                         str8_va(infix.token.value),
+                         str8_va(object_name(rhs->tag)));
+        }
+        result = object_from_error(error, arena);
+        break;
+      }
     }
   }
 
@@ -1847,11 +1974,14 @@ eval_expr_infix(AstExprInfix infix, Arena *arena)
 internal Object const *
 eval_expr_if_else(AstExprIfElse if_else, Arena *arena)
 {
-  TmpArena scratch = scratch_begin(arena);
-  b8 condition     = object_is_truthy(eval_expr(if_else.condition, scratch.arena));
-  scratch_end(scratch);
+  TmpArena tmp            = arena_tmp_begin(arena);
+  Object const *condition = eval_expr(if_else.condition, tmp.arena);
+  if (object_is_error(condition)) return condition;
 
-  if (condition)
+  b8 is_true = object_is_truthy(condition);
+  arena_tmp_end(tmp);
+
+  if (is_true)
   {
     return eval_block(if_else.consequence, arena);
   }
@@ -1870,7 +2000,7 @@ eval_expr(AstExpr *expr, Arena *arena)
 {
   switch (expr->tag)
   {
-    case AstExpr_Identifier: break;
+    case AstExpr_Identifier: return OBJECT_NULL;
 
     case AstExpr_Number: return object_from_number(expr->data.number.value, arena);
     case AstExpr_Boolean: return object_from_bool(expr->data.boolean.value);
@@ -1878,14 +2008,11 @@ eval_expr(AstExpr *expr, Arena *arena)
     case AstExpr_Infix: return eval_expr_infix(expr->data.infix, arena);
     case AstExpr_IfElse: return eval_expr_if_else(expr->data.if_else, arena);
 
-    case AstExpr_Function: break;
-    case AstExpr_Call: break;
-    default:
-      // TODO(tad): error
-      break;
-  }
+    case AstExpr_Function: return OBJECT_NULL;
+    case AstExpr_Call: return OBJECT_NULL;
 
-  return OBJECT_NULL;
+    default: return OBJECT_NULL;
+  }
 }
 
 internal Object const *
@@ -1896,12 +2023,16 @@ eval_stmt(AstStmt *stmt, Arena *arena)
     case AstStmt_Let: return OBJECT_NULL;
     case AstStmt_Ret:
     {
+      Object const *ret_value = eval_expr(stmt->data.expr.expr, arena);
+      if (object_is_error(ret_value)) return ret_value;
+
       Object *ret         = arena_alloc_t(arena, Object);
       ret->tag            = ObjectKind_Return;
-      ret->data.ret.value = eval_expr(stmt->data.expr.expr, arena);
+      ret->data.ret.value = ret_value;
       return ret;
     }
     case AstStmt_Expr: return eval_expr(stmt->data.expr.expr, arena);
+
     default: return OBJECT_NULL;
   }
 }
@@ -1915,10 +2046,8 @@ eval_block(AstStmtBlock *block, Arena *arena)
   {
     result = eval_stmt(stmt, arena);
 
-    if (result->tag == ObjectKind_Return)
-    {
-      return result;
-    }
+    if (result->tag == ObjectKind_Return) return result;
+    if (result->tag == ObjectKind_Error) return result;
   }
 
   return result;
@@ -1933,10 +2062,8 @@ eval_program(AstStmt *statements, Arena *arena)
   {
     result = eval_stmt(stmt, arena);
 
-    if (result->tag == ObjectKind_Return)
-    {
-      return result->data.ret.value;
-    }
+    if (result->tag == ObjectKind_Return) return result->data.ret.value;
+    if (result->tag == ObjectKind_Error) return result;
   }
 
   return result;
@@ -2105,10 +2232,10 @@ repl(void)
 
     if (p.message_list.level < MessageLevel_Error)
     {
-      TmpArena t           = scratch_begin(0);
+      TmpArena scratch     = scratch_begin(0);
       Object const *result = eval_program(p.statements, p.arena);
-      printf("%.*s\n", str8_va(eval_inspect(result, t.arena)));
-      arena_tmp_end(t);
+      printf("%.*s\n", str8_va(eval_inspect(result, scratch.arena)));
+      scratch_end(scratch);
     }
 
     parse_free(&p);
@@ -3280,6 +3407,58 @@ test_eval_return_stmt(void)
 }
 
 internal int
+test_eval_error_handling(void)
+{
+  struct
+  {
+    Str8 input;
+    Str8 expected;
+  } tests[] = {
+    {
+      str8_lit("5 + true;"),
+      str8_lit("type mismatch: Number + Boolean"),
+    },
+    {
+      str8_lit("5 + true; 5;"),
+      str8_lit("type mismatch: Number + Boolean"),
+    },
+    {
+      str8_lit("-true"),
+      str8_lit("unknown operator: -Boolean"),
+    },
+    {
+      str8_lit("true + false;"),
+      str8_lit("unknown operator: Boolean + Boolean"),
+    },
+    {
+      str8_lit("5; true + false; 5"),
+      str8_lit("unknown operator: Boolean + Boolean"),
+    },
+    {
+      str8_lit("if (10 > 1) { true + false; }"),
+      str8_lit("unknown operator: Boolean + Boolean"),
+    },
+  };
+
+  for (usize i = 0; i < arr_count(tests); i++)
+  {
+    Parser p = parse(tests[i].input);
+    test_helper(test_parse_check_messages(&p));
+
+    Object const *result = eval_program(p.statements, p.arena);
+    test_assert_m(result->tag == ObjectKind_Error, "expected error object");
+    test_assert_m(str8_equal(tests[i].expected, result->data.err.value),
+                  "expected error '%.*s', evaluated '%.*s'",
+                  str8_va(tests[i].expected),
+                  str8_va(result->data.err.value));
+
+    parse_free(&p);
+  }
+
+  return 0;
+}
+
+internal int
 test(void)
 {
   int result = 0;
@@ -3309,6 +3488,8 @@ test(void)
   result += test_eval_if_else_expr();
 
   result += test_eval_return_stmt();
+
+  result += test_eval_error_handling();
 
   // TODO(tad): Investigate segfault when eval "1 == (return 1)"
 
