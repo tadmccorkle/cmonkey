@@ -378,7 +378,7 @@ str8_from_cstr(char const *c)
   return str8((u8 const *)c, cstr_length(c));
 }
 
-internal b32
+internal bool
 str8_equal(Str8 a, Str8 b)
 {
   return a.len == b.len && memcmp(a.buf, b.buf, a.len) == 0;
@@ -492,19 +492,19 @@ str8_build_to_arena(StrBuilder8 *builder, Arena *arena)
 ////////////////////////////////////////////////////////////////////////////////
 // lex
 
-internal b32
+internal bool
 is_whitespace(u8 ch)
 {
   return ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n' || ch == '\v' || ch == '\f';
 }
 
-internal b32
+internal bool
 is_digit(u8 ch)
 {
   return '0' <= ch && ch <= '9';
 }
 
-internal b32
+internal bool
 is_letter(u8 ch)
 {
   return ('a' <= ch && ch <= 'z') || ('A' <= ch && ch <= 'Z');
@@ -555,7 +555,6 @@ typedef enum
 #define TOKEN_KIND(name) TokenKind_##name,
   TOKEN_KINDS(TOKEN_KIND)
 #undef TOKEN_KIND
-  TokenKind_COUNT
 } TokenKind;
 
 internal Str8
@@ -761,7 +760,6 @@ typedef enum
   MessageLevel_Warn,
   MessageLevel_Error,
   MessageLevel_Critical,
-  MessageLevel_COUNT
 } MessageLevel;
 
 internal Str8
@@ -806,7 +804,6 @@ typedef enum
   Precedence_Product,     // *
   Precedence_Prefix,      // - !
   Precedence_Call,        // func()
-  Precedence_COUNT
 } Precedence;
 
 #define AST_EXPR_KINDS(X) \
@@ -824,7 +821,6 @@ typedef enum
 #define AST_EXPR_KIND(name) AstExpr_##name,
   AST_EXPR_KINDS(AST_EXPR_KIND)
 #undef AST_EXPR_KIND
-  AstExpr_COUNT
 } AstExprKind;
 
 internal Str8
@@ -945,7 +941,6 @@ typedef enum
   AstStmt_Let,
   AstStmt_Ret,
   AstStmt_Expr,
-  AstStmt_COUNT
 } AstStmtKind;
 
 typedef struct AstStmtLet AstStmtLet;
@@ -1175,7 +1170,7 @@ parse_advance_token(Parser *p)
   lex_advance_token(&p->l, &p->peek_token);
 }
 
-internal b32
+internal bool
 parse_expect(Parser *p, TokenKind kind)
 {
   if (p->peek_token.kind == kind)
@@ -1217,321 +1212,287 @@ parse_get_precedence(TokenKind kind)
   }
 }
 
-internal AstStmt *parse_stmt(Parser *p);
 internal AstExpr *parse_expr(Parser *p, Precedence precedence);
+internal AstStmt *parse_stmt(Parser *p);
 internal AstStmtBlock *parse_block(Parser *p);
 
-internal AstStmtBlock *
-parse_block(Parser *p)
+internal AstExpr *
+parse_expr_identifier(Parser *p)
 {
-  AstStmtBlock *block = arena_alloc_t(p->arena, AstStmtBlock);
-  block->token        = p->curr_token;
+  AstExpr *expr               = arena_alloc_t(p->arena, AstExpr);
+  expr->tag                   = AstExpr_Identifier;
+  expr->data.identifier.token = p->curr_token;
+  return expr;
+}
+
+internal AstExpr *
+parse_expr_number(Parser *p)
+{
+  AstExpr *expr           = arena_alloc_t(p->arena, AstExpr);
+  expr->tag               = AstExpr_Number;
+  expr->data.number.token = p->curr_token;
+
+  u8 buf[64];
+  usize len = min(p->curr_token.value.len, sizeof(buf) - 1);
+  memcpy(buf, p->curr_token.value.buf, len);
+  buf[len] = 0;
+
+  char *end;
+  errno = 0;
+
+  s64 number_value = strtoll((char *)buf, &end, 10);
+
+  bool is_out_of_range = errno == ERANGE;
+  bool is_not_number   = end == (char *)buf;
+  if (is_out_of_range || is_not_number)
+  {
+    Str8 error =
+    is_out_of_range
+    ? str8_f(p->arena, "Number literal '%.*s' is out of range.", str8_va(p->curr_token.value))
+    : str8_f(p->arena, "'%.*s' is not a number literal.", str8_va(p->curr_token.value));
+    parse_error(p, MessageLevel_Error, error);
+  }
+  else
+  {
+    expr->data.number.value = number_value;
+  }
+
+  return expr;
+}
+
+internal AstExpr *
+parse_expr_boolean(Parser *p)
+{
+  AstExpr *expr            = arena_alloc_t(p->arena, AstExpr);
+  expr->tag                = AstExpr_Boolean;
+  expr->data.boolean.token = p->curr_token;
+  expr->data.boolean.value = p->curr_token.kind == TokenKind_True;
+  return expr;
+}
+
+internal AstExpr *
+parse_expr_unary_op(Parser *p)
+{
+  Token token = p->curr_token;
 
   parse_advance_token(p);
 
-  SLL_BUILDER(AstStmt) stmts;
-  sll_builder_init(stmts);
+  AstExpr *expr           = arena_alloc_t(p->arena, AstExpr);
+  expr->tag               = AstExpr_Prefix;
+  expr->data.prefix.token = token;
+  expr->data.prefix.rhs   = parse_expr(p, Precedence_Prefix);
+  return expr;
+}
 
-  while (p->curr_token.kind != TokenKind_RBrace && p->curr_token.kind != TokenKind_EOF)
+internal AstExpr *
+parse_expr_if_else(Parser *p)
+{
+  AstExpr *expr            = arena_alloc_t(p->arena, AstExpr);
+  expr->tag                = AstExpr_IfElse;
+  expr->data.if_else.token = p->curr_token;
+
+  if (!parse_expect(p, TokenKind_LParen)) return expr;
+  parse_advance_token(p);
+  expr->data.if_else.condition = parse_expr(p, Precedence_Lowest);
+  if (!parse_expect(p, TokenKind_RParen)) return expr;
+
+  if (!parse_expect(p, TokenKind_LBrace)) return expr;
+  expr->data.if_else.consequence = parse_block(p);
+
+  if (p->peek_token.kind == TokenKind_Else)
   {
-    AstStmt *stmt = parse_stmt(p);
-    if (stmt)
+    parse_advance_token(p);
+    if (!parse_expect(p, TokenKind_LBrace)) return expr;
+    expr->data.if_else.alternative = parse_block(p);
+  }
+
+  return expr;
+}
+
+internal AstExpr *
+parse_expr_function(Parser *p)
+{
+  AstExpr *expr             = arena_alloc_t(p->arena, AstExpr);
+  expr->tag                 = AstExpr_Function;
+  expr->data.function.token = p->curr_token;
+
+  if (!parse_expect(p, TokenKind_LParen)) return expr;
+
+  bool is_valid = true;
+
+  if (p->peek_token.kind != TokenKind_RParen)
+  {
+    SLL_BUILDER(AstExprFunctionParam) params;
+    sll_builder_init(params);
+
+    while (parse_expect(p, TokenKind_Identifier))
     {
-      sll_builder_append(stmts, stmt);
+      AstExprFunctionParam *param = arena_alloc_t(p->arena, AstExprFunctionParam);
+      param->identifier.token     = p->curr_token;
+
+      sll_builder_append(params, param);
+
+      if (p->peek_token.kind == TokenKind_RParen)
+      {
+        parse_advance_token(p);
+        break;
+      }
+
+      if (!parse_expect(p, TokenKind_Comma))
+      {
+        is_valid = false;
+        break;
+      }
     }
 
+    expr->data.function.params = sll_builder_result(params);
+  }
+  else
+  {
     parse_advance_token(p);
   }
 
-  block->statements = sll_builder_result(stmts);
-
-  if (p->curr_token.kind == TokenKind_EOF)
+  if (is_valid && parse_expect(p, TokenKind_LBrace))
   {
-    parse_error(p, MessageLevel_Error, str8_lit("Block reached EOF before closing '}'."));
+    expr->data.function.body = parse_block(p);
   }
 
-  return block;
+  return expr;
 }
 
-// TODO(tad): Consider refactoring various parts of this function:
-// - Use scratch arena instead of goto rollbacks.
-// - Pull prefix and infix into separate functions.
-// - Create creation functions for each expression type.
+internal AstExpr *
+parse_expr_grouped(Parser *p)
+{
+  parse_advance_token(p);
+
+  AstExpr *grouped_expr = parse_expr(p, Precedence_Lowest);
+  parse_expect(p, TokenKind_RParen);
+  return grouped_expr;
+}
+
+internal AstExpr *
+parse_expr_prefix(Parser *p)
+{
+  switch (p->curr_token.kind)
+  {
+    case TokenKind_Identifier: return parse_expr_identifier(p);
+    case TokenKind_Number: return parse_expr_number(p);
+    case TokenKind_If: return parse_expr_if_else(p);
+    case TokenKind_Function: return parse_expr_function(p);
+    case TokenKind_LParen: return parse_expr_grouped(p);
+
+    case TokenKind_True:
+    case TokenKind_False: return parse_expr_boolean(p);
+
+    case TokenKind_Minus:
+    case TokenKind_Bang: return parse_expr_unary_op(p);
+
+    default:
+    {
+      Str8 error = str8_f(p->arena,
+                          "'%.*s' (type '%.*s') is not a valid prefix token.",
+                          str8_va(p->curr_token.value),
+                          str8_va(token_name(p->curr_token.kind)));
+      parse_error(p, MessageLevel_Error, error);
+      return 0;
+    }
+  }
+}
+
+internal AstExpr *
+parse_expr_binary_op(Parser *p, AstExpr *lhs)
+{
+  parse_advance_token(p);
+
+  AstExpr *expr          = arena_alloc_t(p->arena, AstExpr);
+  expr->tag              = AstExpr_Infix;
+  expr->data.infix.token = p->curr_token;
+  expr->data.infix.lhs   = lhs;
+
+  // NOTE(tad): Decreasing the infix precedence here is one way to support
+  // right-associative operators.
+  Precedence infix_precedence = parse_get_precedence(p->curr_token.kind);
+  parse_advance_token(p);
+  expr->data.infix.rhs = parse_expr(p, infix_precedence);
+
+  return expr;
+}
+
+internal AstExpr *
+parse_expr_call(Parser *p, AstExpr *lhs)
+{
+  parse_advance_token(p);
+
+  AstExpr *call            = arena_alloc_t(p->arena, AstExpr);
+  call->tag                = AstExpr_Call;
+  call->data.call.token    = p->curr_token;
+  call->data.call.function = lhs;
+
+  if (p->peek_token.kind != TokenKind_RParen)
+  {
+    SLL_BUILDER(AstExprCallArg) args;
+    sll_builder_init(args);
+
+    for (;;)
+    {
+      parse_advance_token(p);
+
+      AstExprCallArg *arg = arena_alloc_t(p->arena, AstExprCallArg);
+      arg->expr           = parse_expr(p, Precedence_Lowest);
+
+      sll_builder_append(args, arg);
+
+      if (p->peek_token.kind == TokenKind_RParen)
+      {
+        parse_advance_token(p);
+        break;
+      }
+
+      if (!parse_expect(p, TokenKind_Comma))
+      {
+        break;
+      }
+    }
+
+    call->data.call.args = sll_builder_result(args);
+  }
+  else
+  {
+    parse_advance_token(p);
+  }
+
+  return call;
+}
+
+internal AstExpr *
+parse_expr_infix(Parser *p, AstExpr *lhs)
+{
+  switch (p->peek_token.kind)
+  {
+    case TokenKind_Plus:
+    case TokenKind_Minus:
+    case TokenKind_Slash:
+    case TokenKind_Star:
+    case TokenKind_Equal:
+    case TokenKind_NotEqual:
+    case TokenKind_Less:
+    case TokenKind_Greater: return parse_expr_binary_op(p, lhs);
+
+    case TokenKind_LParen: return parse_expr_call(p, lhs);
+
+    default: return lhs;
+  }
+}
+
 internal AstExpr *
 parse_expr(Parser *p, Precedence precedence)
 {
-  AstExpr *lhs = 0;
+  AstExpr *lhs = parse_expr_prefix(p);
 
-  // prefix
-  {
-    TmpArena tmp;
-
-    switch (p->curr_token.kind)
-    {
-      case TokenKind_Identifier:
-      {
-        lhs                        = arena_alloc_t(p->arena, AstExpr);
-        lhs->tag                   = AstExpr_Identifier;
-        lhs->data.identifier.token = p->curr_token;
-        break;
-      }
-
-      case TokenKind_Number:
-      {
-        u8 buf[64];
-        usize len = min(p->curr_token.value.len, sizeof(buf) - 1);
-        memcpy(buf, p->curr_token.value.buf, len);
-        buf[len] = 0;
-
-        char *end;
-        errno = 0;
-
-        s64 number_value = strtoll((char *)buf, &end, 10);
-
-        if (errno == ERANGE)
-        {
-          Str8 error =
-          str8_f(p->arena, "'%.*s' is not a number literal.", str8_va(p->curr_token.value));
-          parse_error(p, MessageLevel_Error, error);
-        }
-        else if (end == (char *)buf)
-        {
-          Str8 error =
-          str8_f(p->arena, "Number literal '%.*s' is out of range.", str8_va(p->curr_token.value));
-          parse_error(p, MessageLevel_Error, error);
-        }
-        else
-        {
-          lhs                    = arena_alloc_t(p->arena, AstExpr);
-          lhs->tag               = AstExpr_Number;
-          lhs->data.number.token = p->curr_token;
-          lhs->data.number.value = number_value;
-        }
-        break;
-      }
-
-      case TokenKind_True:
-      case TokenKind_False:
-      {
-        lhs                     = arena_alloc_t(p->arena, AstExpr);
-        lhs->tag                = AstExpr_Boolean;
-        lhs->data.boolean.token = p->curr_token;
-        lhs->data.boolean.value = p->curr_token.kind == TokenKind_True;
-        break;
-      }
-
-      case TokenKind_Minus:
-      case TokenKind_Bang:
-      {
-        tmp = arena_tmp_begin(p->arena);
-
-        AstExpr *prefix_expr           = arena_alloc_t(p->arena, AstExpr);
-        prefix_expr->tag               = AstExpr_Prefix;
-        prefix_expr->data.prefix.token = p->curr_token;
-        parse_advance_token(p);
-
-        prefix_expr->data.prefix.rhs = parse_expr(p, Precedence_Prefix);
-        if (prefix_expr->data.prefix.rhs == 0) goto rollback_tmp;
-
-        lhs = prefix_expr;
-        break;
-      }
-
-      case TokenKind_If:
-      {
-        tmp = arena_tmp_begin(p->arena);
-
-        AstExpr *if_expr;
-        Token if_token = p->curr_token;
-
-        if (!parse_expect(p, TokenKind_LParen)) goto rollback_tmp;
-        if_expr = arena_alloc_t(p->arena, AstExpr);
-        parse_advance_token(p);
-        AstExpr *condition = parse_expr(p, Precedence_Lowest);
-        if (condition == 0) goto rollback_tmp;
-        if (!parse_expect(p, TokenKind_RParen)) goto rollback_tmp;
-
-        if (!parse_expect(p, TokenKind_LBrace)) goto rollback_tmp;
-        AstStmtBlock *consequence = parse_block(p);
-
-        AstStmtBlock *alternative = 0;
-        if (p->peek_token.kind == TokenKind_Else)
-        {
-          parse_advance_token(p);
-          if (!parse_expect(p, TokenKind_LBrace)) goto rollback_tmp;
-          alternative = parse_block(p);
-        }
-
-        lhs                           = if_expr;
-        lhs->tag                      = AstExpr_IfElse;
-        lhs->data.if_else.token       = if_token;
-        lhs->data.if_else.condition   = condition;
-        lhs->data.if_else.consequence = consequence;
-        lhs->data.if_else.alternative = alternative;
-        break;
-      }
-
-      case TokenKind_Function:
-      {
-        tmp = arena_tmp_begin(p->arena);
-
-        AstExpr *fn_expr;
-        Token fn_token = p->curr_token;
-
-        if (!parse_expect(p, TokenKind_LParen)) goto rollback_tmp;
-
-        fn_expr = arena_alloc_t(p->arena, AstExpr);
-
-        SLL_BUILDER(AstExprFunctionParam) params;
-        sll_builder_init(params);
-
-        if (p->peek_token.kind != TokenKind_RParen)
-        {
-          while (parse_expect(p, TokenKind_Identifier))
-          {
-            AstExprFunctionParam *param = arena_alloc_t(p->arena, AstExprFunctionParam);
-            param->identifier.token     = p->curr_token;
-
-            sll_builder_append(params, param);
-
-            if (p->peek_token.kind == TokenKind_RParen)
-            {
-              parse_advance_token(p);
-              break;
-            }
-
-            if (!parse_expect(p, TokenKind_Comma))
-            {
-              goto rollback_tmp;
-            }
-          }
-        }
-        else
-        {
-          parse_advance_token(p);
-        }
-
-        if (!parse_expect(p, TokenKind_LBrace)) goto rollback_tmp;
-        AstStmtBlock *body = parse_block(p);
-
-        lhs                       = fn_expr;
-        lhs->tag                  = AstExpr_Function;
-        lhs->data.function.token  = fn_token;
-        lhs->data.function.params = sll_builder_result(params);
-        lhs->data.function.body   = body;
-        break;
-      }
-
-      case TokenKind_LParen:
-      {
-        tmp = arena_tmp_begin(p->arena);
-
-        parse_advance_token(p);
-        AstExpr *grouped_expr = parse_expr(p, Precedence_Lowest);
-        if (!parse_expect(p, TokenKind_RParen)) goto rollback_tmp;
-        lhs = grouped_expr;
-        break;
-      }
-
-      default:
-      {
-        Str8 error = str8_f(p->arena,
-                            "'%.*s' (type '%.*s') is not a valid prefix token.",
-                            str8_va(p->curr_token.value),
-                            str8_va(token_name(p->curr_token.kind)));
-        parse_error(p, MessageLevel_Error, error);
-        return lhs;
-      }
-    }
-
-    if (false)
-    {
-    rollback_tmp:
-      arena_tmp_end(tmp);
-    }
-  }
-
-  // infix
   while (p->curr_token.kind != TokenKind_Semicolon &&
          precedence < parse_get_precedence(p->peek_token.kind))
   {
-    switch (p->peek_token.kind)
-    {
-      case TokenKind_Plus:
-      case TokenKind_Minus:
-      case TokenKind_Slash:
-      case TokenKind_Star:
-      case TokenKind_Equal:
-      case TokenKind_NotEqual:
-      case TokenKind_Less:
-      case TokenKind_Greater:
-      {
-        parse_advance_token(p);
-
-        AstExpr *infix          = arena_alloc_t(p->arena, AstExpr);
-        infix->tag              = AstExpr_Infix;
-        infix->data.infix.token = p->curr_token;
-        infix->data.infix.lhs   = lhs;
-
-        // NOTE(tad): Decreasing the infix precedence here is one way to support
-        // right-associative operators.
-        Precedence infix_precedence = parse_get_precedence(p->curr_token.kind);
-        parse_advance_token(p);
-        infix->data.infix.rhs = parse_expr(p, infix_precedence);
-
-        lhs = infix;
-        break;
-      }
-
-      case TokenKind_LParen:
-      {
-        parse_advance_token(p);
-
-        Token call_token = p->curr_token;
-
-        SLL_BUILDER(AstExprCallArg) args;
-        sll_builder_init(args);
-
-        if (p->peek_token.kind != TokenKind_RParen)
-        {
-          for (;;)
-          {
-            parse_advance_token(p);
-
-            AstExprCallArg *arg = arena_alloc_t(p->arena, AstExprCallArg);
-            arg->expr           = parse_expr(p, Precedence_Lowest);
-
-            sll_builder_append(args, arg);
-
-            if (p->peek_token.kind == TokenKind_RParen)
-            {
-              parse_advance_token(p);
-              break;
-            }
-
-            if (!parse_expect(p, TokenKind_Comma))
-            {
-              break;
-            }
-          }
-        }
-        else
-        {
-          parse_advance_token(p);
-        }
-
-        AstExpr *call            = arena_alloc_t(p->arena, AstExpr);
-        call->tag                = AstExpr_Call;
-        call->data.call.token    = call_token;
-        call->data.call.function = lhs;
-        call->data.call.args     = sll_builder_result(args);
-
-        lhs = call;
-        break;
-      }
-
-      default: return lhs;
-    }
+    lhs = parse_expr_infix(p, lhs);
   }
 
   return lhs;
@@ -1544,7 +1505,6 @@ parse_stmt(Parser *p)
 
   switch (p->curr_token.kind)
   {
-    // TODO(tad): Could provide better error messages if invalid expr tokens are handled here.
     case TokenKind_Identifier:
     case TokenKind_Number:
     case TokenKind_Assign:
@@ -1645,19 +1605,47 @@ parse_stmt(Parser *p)
       }
       break;
     }
+
     case TokenKind_EOF: assert(0 && "EOF tokens are checked by outer loop condition."); break;
+
     default: assert(0 && "Tokenizer produced invalid token."); break;
   }
 
   return stmt;
 }
 
-// TODO(tad):
-// Consider no branching expectation checks with result type, only breaking before allocating
-// and initializing the statement. This might not be doable.
-//
-// Also consider usable sentinel types instead of null references. Could be useful for branchless
-// expectation checks, but more generally as well.
+internal AstStmtBlock *
+parse_block(Parser *p)
+{
+  AstStmtBlock *block = arena_alloc_t(p->arena, AstStmtBlock);
+  block->token        = p->curr_token;
+
+  parse_advance_token(p);
+
+  SLL_BUILDER(AstStmt) stmts;
+  sll_builder_init(stmts);
+
+  while (p->curr_token.kind != TokenKind_RBrace && p->curr_token.kind != TokenKind_EOF)
+  {
+    AstStmt *stmt = parse_stmt(p);
+    if (stmt)
+    {
+      sll_builder_append(stmts, stmt);
+    }
+
+    parse_advance_token(p);
+  }
+
+  block->statements = sll_builder_result(stmts);
+
+  if (p->curr_token.kind == TokenKind_EOF)
+  {
+    parse_error(p, MessageLevel_Error, str8_lit("Block reached EOF before closing '}'."));
+  }
+
+  return block;
+}
+
 internal Parser
 parse(Str8 input)
 {
@@ -1698,7 +1686,6 @@ typedef enum
 #define OBJECT_KIND(name) ObjectKind_##name,
   OBJECT_KINDS(OBJECT_KIND)
 #undef OBJECT_KIND
-  ObjectKind_COUNT
 } ObjectKind;
 
 internal Str8
@@ -1804,18 +1791,18 @@ object_from_error(Str8 error, Arena *arena)
 }
 
 internal Object const *
-object_from_bool(b8 value)
+object_from_bool(bool value)
 {
   return value ? OBJECT_TRUE : OBJECT_FALSE;
 }
 
-internal b8
+internal bool
 object_is_error(Object const *object)
 {
   return object->tag == ObjectKind_Error;
 }
 
-internal b8
+internal bool
 object_is_truthy(Object const *object)
 {
   return object != OBJECT_NULL && object != OBJECT_FALSE;
@@ -1978,7 +1965,7 @@ eval_expr_if_else(AstExprIfElse if_else, Arena *arena)
   Object const *condition = eval_expr(if_else.condition, tmp.arena);
   if (object_is_error(condition)) return condition;
 
-  b8 is_true = object_is_truthy(condition);
+  bool is_true = object_is_truthy(condition);
   arena_tmp_end(tmp);
 
   if (is_true)
@@ -2126,7 +2113,7 @@ rlpl(void)
 {
   char const *PROMPT = ">> ";
   char buffer[KiB(4)];
-  b32 print_prompt = true;
+  bool print_prompt = true;
 
   for (;;)
   {
@@ -2161,7 +2148,7 @@ rppl(void)
 {
   char const *PROMPT = ">> ";
   char buffer[KiB(4)];
-  b32 print_prompt = true;
+  bool print_prompt = true;
 
   for (;;)
   {
@@ -2205,7 +2192,7 @@ repl(void)
 {
   char const *PROMPT = ">> ";
   char buffer[KiB(4)];
-  b32 print_prompt = true;
+  bool print_prompt = true;
 
   for (;;)
   {
@@ -3330,7 +3317,7 @@ test_eval_if_else_expr(void)
   struct
   {
     Str8 input;
-    b8 is_null;
+    bool is_null;
     union
     {
       s64 num;
@@ -3490,8 +3477,6 @@ test(void)
   result += test_eval_return_stmt();
 
   result += test_eval_error_handling();
-
-  // TODO(tad): Investigate segfault when eval "1 == (return 1)"
 
   return result;
 }

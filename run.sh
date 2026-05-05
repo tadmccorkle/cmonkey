@@ -5,7 +5,7 @@ BIN_NAME="cmonkey"
 
 BUILD_FLAGS="-Wno-gnu-zero-variadic-macro-arguments"
 LINT_STRICT_FLAGS="$BUILD_FLAGS -Wno-declaration-after-statement -Wno-pre-c11-compat -Wno-padded"
-LINT_LAX_FLAGS="$LINT_STRICT_FLAGS -Wno-unused-macros -Wno-switch-enum -Wno-poison-system-directories"
+LINT_LAX_FLAGS="$LINT_STRICT_FLAGS -Wno-unused-macros -Wno-switch-enum -Wno-covered-switch-default -Wno-poison-system-directories"
 
 slint() {
 	clang $SRC_DIR/src/main.c -fsyntax-only -Weverything $LINT_STRICT_FLAGS "$@"
