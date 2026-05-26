@@ -992,7 +992,7 @@ struct Parser
 };
 
 internal void
-parse_init(Parser *p, Str8 input, Arena *arena)
+parse_init(Parser *p, Arena *arena, Str8 input)
 {
   p->arena = arena;
 
@@ -1646,11 +1646,12 @@ parse_block(Parser *p)
   return block;
 }
 
+// TODO(tad): Accept arena here.
 internal Parser
 parse(Str8 input)
 {
   Parser p = { 0 };
-  parse_init(&p, input, arena_create(KiB(4)));
+  parse_init(&p, arena_create(KiB(4)), input);
 
   SLL_BUILDER(AstStmt) stmts;
   sll_builder_init(stmts);
@@ -1750,14 +1751,136 @@ internal Object const *OBJECT_TRUE  = &(Object){ ObjectKind_Boolean, { .boolean.
 internal Object const *OBJECT_FALSE = &(Object){ ObjectKind_Boolean, { .boolean.value = false } };
 internal Object const *OBJECT_NULL  = &(Object){ ObjectKind_Null, { 0 } };
 
+#define ENV_LOAD_FACTOR 0.75
+
+typedef struct EnvVar EnvVar;
+struct EnvVar
+{
+  Str8 name;
+  Object const *value;
+};
+
+typedef struct Env Env;
+struct Env
+{
+  Env *outer;
+  Arena *arena;
+
+  u32 cnt;
+  u32 cap;
+  EnvVar *vars;
+};
+
+internal bool
+env_is_empty(EnvVar var)
+{
+  return var.name.buf == 0;
+}
+
+internal u32
+env_hash(Str8 key)
+{
+  u32 hash = 2166136261;
+  for (usize i = 0; i < key.len; i++)
+  {
+    hash ^= (u32)key.buf[i];
+    hash *= 16777619;
+  }
+  return hash;
+}
+
+internal void
+env_init(Env *env, Arena *arena, u32 initial_capacity)
+{
+  u32 cap = max(initial_capacity, 1);
+
+  env->arena = arena;
+  env->cnt   = 0;
+  env->cap   = cap;
+  env->vars  = arena_alloc_tn(arena, EnvVar, cap);
+}
+
+internal EnvVar *
+env_find(Env const *env, Str8 name)
+{
+  u32 cap = env->cap;
+  u32 h   = env_hash(name) % cap;
+
+  for (;;)
+  {
+    EnvVar *var = &env->vars[h];
+
+    if (env_is_empty(*var) || str8_equal(var->name, name))
+    {
+      return var;
+    }
+
+    h = (h + 1) % cap;
+  }
+}
+
+internal void
+env_grow(Env *env)
+{
+  TmpArena scratch = scratch_begin(env->arena);
+
+  u32 old_cap      = env->cap;
+  u32 new_cap      = old_cap * 2;
+  EnvVar *old_vars = arena_alloc_tn_nz(scratch.arena, EnvVar, old_cap);
+
+  memcpy(old_vars, env->vars, old_cap * sizeof(*env->vars));
+
+  env->vars = arena_realloc_t_nz(env->arena, env->vars, EnvVar, env->cap, new_cap);
+  env->cap  = new_cap;
+
+  memset(env->vars, 0, new_cap * sizeof(*env->vars));
+
+  for (usize i = 0; i < old_cap; i++)
+  {
+    EnvVar old_var = old_vars[i];
+    if (!env_is_empty(old_var))
+    {
+      EnvVar *var = env_find(env, old_var.name);
+      *var        = old_var;
+    }
+  }
+
+  scratch_end(scratch);
+}
+
+internal Object const *
+env_get(Env const *env, Str8 name)
+{
+  Object const *value = env_find(env, name)->value;
+  return value == 0 && env->outer != 0 ? env_get(env->outer, name) : value;
+}
+
+internal void
+env_set(Env *env, Str8 name, Object const *value)
+{
+  if (env->cnt + 1 > env->cap * ENV_LOAD_FACTOR)
+  {
+    env_grow(env);
+  }
+
+  EnvVar *var = env_find(env, name);
+  if (env_is_empty(*var))
+  {
+    env->cnt += 1;
+  }
+
+  var->name  = name;
+  var->value = value;
+}
+
 internal Str8
-eval_inspect(Object const *o, Arena *arena)
+eval_inspect(Arena *arena, Object const *o)
 {
   switch (o->tag)
   {
     case ObjectKind_Number: return str8_f(arena, "%lld", o->data.number.value);
     case ObjectKind_Boolean: return o->data.boolean.value ? KEYWORD_TRUE : KEYWORD_FALSE;
-    case ObjectKind_Return: return eval_inspect(o->data.ret.value, arena);
+    case ObjectKind_Return: return eval_inspect(arena, o->data.ret.value);
     case ObjectKind_Null: return str8_lit("null");
     case ObjectKind_Error: return str8_f(arena, "Error: %.*s", str8_va(o->data.err.value));
     default:
@@ -1765,15 +1888,15 @@ eval_inspect(Object const *o, Arena *arena)
   }
 }
 
-internal Object const *eval_program(AstStmt *statements, Arena *arena);
-internal Object const *eval_block(AstStmtBlock *block, Arena *arena);
-internal Object const *eval_expr(AstExpr *expr, Arena *arena);
-internal Object const *eval_expr_prefix(AstExprPrefix prefix, Arena *arena);
-internal Object const *eval_expr_infix(AstExprInfix infix, Arena *arena);
-internal Object const *eval_expr_if_else(AstExprIfElse if_else, Arena *arena);
+internal Object const *eval_program(Arena *arena, AstStmt *statements);
+internal Object const *eval_block(Arena *arena, AstStmtBlock *block);
+internal Object const *eval_expr(Arena *arena, AstExpr *expr);
+internal Object const *eval_expr_prefix(Arena *arena, AstExprPrefix prefix);
+internal Object const *eval_expr_infix(Arena *arena, AstExprInfix infix);
+internal Object const *eval_expr_if_else(Arena *arena, AstExprIfElse if_else);
 
 internal Object const *
-object_from_number(s64 value, Arena *arena)
+object_from_number(Arena *arena, s64 value)
 {
   Object *result            = arena_alloc_t(arena, Object);
   result->tag               = ObjectKind_Number;
@@ -1782,7 +1905,7 @@ object_from_number(s64 value, Arena *arena)
 }
 
 internal Object const *
-object_from_error(Str8 error, Arena *arena)
+object_from_error(Arena *arena, Str8 error)
 {
   Object *result         = arena_alloc_t(arena, Object);
   result->tag            = ObjectKind_Error;
@@ -1809,7 +1932,7 @@ object_is_truthy(Object const *object)
 }
 
 internal Object const *
-eval_expr_prefix(AstExprPrefix prefix, Arena *arena)
+eval_expr_prefix(Arena *arena, AstExprPrefix prefix)
 {
   Object const *result;
 
@@ -1818,10 +1941,10 @@ eval_expr_prefix(AstExprPrefix prefix, Arena *arena)
     case TokenKind_Bang:
     {
       TmpArena scratch  = scratch_begin(arena);
-      Object const *rhs = eval_expr(prefix.rhs, scratch.arena);
+      Object const *rhs = eval_expr(scratch.arena, prefix.rhs);
       if (object_is_error(rhs))
       {
-        result = object_from_error(rhs->data.err.value, arena);
+        result = object_from_error(arena, rhs->data.err.value);
       }
       else
       {
@@ -1834,19 +1957,19 @@ eval_expr_prefix(AstExprPrefix prefix, Arena *arena)
     case TokenKind_Minus:
     {
       TmpArena scratch  = scratch_begin(arena);
-      Object const *rhs = eval_expr(prefix.rhs, scratch.arena);
+      Object const *rhs = eval_expr(scratch.arena, prefix.rhs);
       if (object_is_error(rhs))
       {
-        result = object_from_error(rhs->data.err.value, arena);
+        result = object_from_error(arena, rhs->data.err.value);
       }
       else if (rhs->tag != ObjectKind_Number)
       {
         Str8 error = str8_f(arena, "unknown operator: -%.*s", str8_va(object_name(rhs->tag)));
-        result     = object_from_error(error, arena);
+        result     = object_from_error(arena, error);
       }
       else
       {
-        result = object_from_number(-rhs->data.number.value, arena);
+        result = object_from_number(arena, -rhs->data.number.value);
       }
       scratch_end(scratch);
       break;
@@ -1858,7 +1981,7 @@ eval_expr_prefix(AstExprPrefix prefix, Arena *arena)
                           "unknown operator: %.*s%.*s",
                           str8_va(prefix.token.value),
                           str8_va(ast_expr_name(prefix.rhs->tag)));
-      result     = object_from_error(error, arena);
+      result     = object_from_error(arena, error);
     }
   }
 
@@ -1866,37 +1989,37 @@ eval_expr_prefix(AstExprPrefix prefix, Arena *arena)
 }
 
 internal Object const *
-eval_expr_infix(AstExprInfix infix, Arena *arena)
+eval_expr_infix(Arena *arena, AstExprInfix infix)
 {
   TmpArena scratch  = scratch_begin(arena);
-  Object const *lhs = eval_expr(infix.lhs, scratch.arena);
-  Object const *rhs = eval_expr(infix.rhs, scratch.arena);
+  Object const *lhs = eval_expr(scratch.arena, infix.lhs);
+  Object const *rhs = eval_expr(scratch.arena, infix.rhs);
 
   Object const *result;
 
   if (object_is_error(lhs))
   {
-    result = object_from_error(lhs->data.err.value, arena);
+    result = object_from_error(arena, lhs->data.err.value);
   }
   else if (object_is_error(rhs))
   {
-    result = object_from_error(rhs->data.err.value, arena);
+    result = object_from_error(arena, rhs->data.err.value);
   }
   else if (lhs->tag == ObjectKind_Number && rhs->tag == ObjectKind_Number)
   {
     switch (infix.token.kind)
     {
       case TokenKind_Plus:
-        result = object_from_number(lhs->data.number.value + rhs->data.number.value, arena);
+        result = object_from_number(arena, lhs->data.number.value + rhs->data.number.value);
         break;
       case TokenKind_Minus:
-        result = object_from_number(lhs->data.number.value - rhs->data.number.value, arena);
+        result = object_from_number(arena, lhs->data.number.value - rhs->data.number.value);
         break;
       case TokenKind_Star:
-        result = object_from_number(lhs->data.number.value * rhs->data.number.value, arena);
+        result = object_from_number(arena, lhs->data.number.value * rhs->data.number.value);
         break;
       case TokenKind_Slash:
-        result = object_from_number(lhs->data.number.value / rhs->data.number.value, arena);
+        result = object_from_number(arena, lhs->data.number.value / rhs->data.number.value);
         break;
       case TokenKind_Less:
         result = object_from_bool(lhs->data.number.value < rhs->data.number.value);
@@ -1917,7 +2040,7 @@ eval_expr_infix(AstExprInfix infix, Arena *arena)
                             str8_va(object_name(lhs->tag)),
                             str8_va(infix.token.value),
                             str8_va(object_name(rhs->tag)));
-        result     = object_from_error(error, arena);
+        result     = object_from_error(arena, error);
         break;
       }
     }
@@ -1947,7 +2070,7 @@ eval_expr_infix(AstExprInfix infix, Arena *arena)
                          str8_va(infix.token.value),
                          str8_va(object_name(rhs->tag)));
         }
-        result = object_from_error(error, arena);
+        result = object_from_error(arena, error);
         break;
       }
     }
@@ -1959,10 +2082,10 @@ eval_expr_infix(AstExprInfix infix, Arena *arena)
 }
 
 internal Object const *
-eval_expr_if_else(AstExprIfElse if_else, Arena *arena)
+eval_expr_if_else(Arena *arena, AstExprIfElse if_else)
 {
   TmpArena tmp            = arena_tmp_begin(arena);
-  Object const *condition = eval_expr(if_else.condition, tmp.arena);
+  Object const *condition = eval_expr(tmp.arena, if_else.condition);
   if (object_is_error(condition)) return condition;
 
   bool is_true = object_is_truthy(condition);
@@ -1970,11 +2093,11 @@ eval_expr_if_else(AstExprIfElse if_else, Arena *arena)
 
   if (is_true)
   {
-    return eval_block(if_else.consequence, arena);
+    return eval_block(arena, if_else.consequence);
   }
   else if (if_else.alternative != 0)
   {
-    return eval_block(if_else.alternative, arena);
+    return eval_block(arena, if_else.alternative);
   }
   else
   {
@@ -1983,17 +2106,17 @@ eval_expr_if_else(AstExprIfElse if_else, Arena *arena)
 }
 
 internal Object const *
-eval_expr(AstExpr *expr, Arena *arena)
+eval_expr(Arena *arena, AstExpr *expr)
 {
   switch (expr->tag)
   {
     case AstExpr_Identifier: return OBJECT_NULL;
 
-    case AstExpr_Number: return object_from_number(expr->data.number.value, arena);
+    case AstExpr_Number: return object_from_number(arena, expr->data.number.value);
     case AstExpr_Boolean: return object_from_bool(expr->data.boolean.value);
-    case AstExpr_Prefix: return eval_expr_prefix(expr->data.prefix, arena);
-    case AstExpr_Infix: return eval_expr_infix(expr->data.infix, arena);
-    case AstExpr_IfElse: return eval_expr_if_else(expr->data.if_else, arena);
+    case AstExpr_Prefix: return eval_expr_prefix(arena, expr->data.prefix);
+    case AstExpr_Infix: return eval_expr_infix(arena, expr->data.infix);
+    case AstExpr_IfElse: return eval_expr_if_else(arena, expr->data.if_else);
 
     case AstExpr_Function: return OBJECT_NULL;
     case AstExpr_Call: return OBJECT_NULL;
@@ -2003,14 +2126,14 @@ eval_expr(AstExpr *expr, Arena *arena)
 }
 
 internal Object const *
-eval_stmt(AstStmt *stmt, Arena *arena)
+eval_stmt(Arena *arena, AstStmt *stmt)
 {
   switch (stmt->tag)
   {
     case AstStmt_Let: return OBJECT_NULL;
     case AstStmt_Ret:
     {
-      Object const *ret_value = eval_expr(stmt->data.expr.expr, arena);
+      Object const *ret_value = eval_expr(arena, stmt->data.expr.expr);
       if (object_is_error(ret_value)) return ret_value;
 
       Object *ret         = arena_alloc_t(arena, Object);
@@ -2018,20 +2141,20 @@ eval_stmt(AstStmt *stmt, Arena *arena)
       ret->data.ret.value = ret_value;
       return ret;
     }
-    case AstStmt_Expr: return eval_expr(stmt->data.expr.expr, arena);
+    case AstStmt_Expr: return eval_expr(arena, stmt->data.expr.expr);
 
     default: return OBJECT_NULL;
   }
 }
 
 internal Object const *
-eval_block(AstStmtBlock *block, Arena *arena)
+eval_block(Arena *arena, AstStmtBlock *block)
 {
   Object const *result = OBJECT_NULL;
 
   for (AstStmt *stmt = block->statements; stmt != 0; stmt = stmt->next)
   {
-    result = eval_stmt(stmt, arena);
+    result = eval_stmt(arena, stmt);
 
     if (result->tag == ObjectKind_Return) return result;
     if (result->tag == ObjectKind_Error) return result;
@@ -2040,14 +2163,22 @@ eval_block(AstStmtBlock *block, Arena *arena)
   return result;
 }
 
+// TODO(tad): This doesn't do any sort of memory management yet. While some intermediate
+// evaluations are freed after use, any objects saved to an environment and environments
+// themselves live for the life of the program (or until the provided arena is freed).
+//
+// Consider reference counting and/or a simple GC implementation. Maybe a free list built
+// on top of arenas? malloc/free?
+//
+// May drop support for closures to simplify automatic memory management implementation.
 internal Object const *
-eval_program(AstStmt *statements, Arena *arena)
+eval_program(Arena *arena, AstStmt *statements)
 {
   Object const *result = OBJECT_NULL;
 
   for (AstStmt *stmt = statements; stmt != 0; stmt = stmt->next)
   {
-    result = eval_stmt(stmt, arena);
+    result = eval_stmt(arena, stmt);
 
     if (result->tag == ObjectKind_Return) return result->data.ret.value;
     if (result->tag == ObjectKind_Error) return result;
@@ -2220,8 +2351,8 @@ repl(void)
     if (p.message_list.level < MessageLevel_Error)
     {
       TmpArena scratch     = scratch_begin(0);
-      Object const *result = eval_program(p.statements, p.arena);
-      printf("%.*s\n", str8_va(eval_inspect(result, scratch.arena)));
+      Object const *result = eval_program(p.arena, p.statements);
+      printf("%.*s\n", str8_va(eval_inspect(scratch.arena, result)));
       scratch_end(scratch);
     }
 
@@ -3220,7 +3351,7 @@ test_eval_number_expr(void)
     Parser p = parse(tests[i].input);
     test_helper(test_parse_check_messages(&p));
 
-    Object const *result = eval_program(p.statements, p.arena);
+    Object const *result = eval_program(p.arena, p.statements);
     test_assert_m(result->tag == ObjectKind_Number, "expected number object");
     test_assert_m(result->data.number.value == tests[i].expected,
                   "expected number value '%lld', evaluated '%lld'",
@@ -3267,7 +3398,7 @@ test_eval_boolean_expr(void)
     Parser p = parse(tests[i].input);
     test_helper(test_parse_check_messages(&p));
 
-    Object const *result = eval_program(p.statements, p.arena);
+    Object const *result = eval_program(p.arena, p.statements);
     test_assert_m(result->tag == ObjectKind_Boolean, "expected boolean object");
     test_assert_m(result->data.boolean.value == tests[i].expected,
                   "expected boolean value '%d', evaluated '%d'",
@@ -3298,7 +3429,7 @@ test_eval_bang(void)
     Parser p = parse(tests[i].input);
     test_helper(test_parse_check_messages(&p));
 
-    Object const *result = eval_program(p.statements, p.arena);
+    Object const *result = eval_program(p.arena, p.statements);
     test_assert_m(result->tag == ObjectKind_Boolean, "expected boolean object");
     test_assert_m(result->data.boolean.value == tests[i].expected,
                   "expected boolean value '%d', evaluated '%d'",
@@ -3338,7 +3469,7 @@ test_eval_if_else_expr(void)
     Parser p = parse(tests[i].input);
     test_helper(test_parse_check_messages(&p));
 
-    Object const *result = eval_program(p.statements, p.arena);
+    Object const *result = eval_program(p.arena, p.statements);
     if (!tests[i].is_null)
     {
       test_assert_m(result->tag == ObjectKind_Number, "expected number object");
@@ -3380,7 +3511,39 @@ test_eval_return_stmt(void)
     Parser p = parse(tests[i].input);
     test_helper(test_parse_check_messages(&p));
 
-    Object const *result = eval_program(p.statements, p.arena);
+    Object const *result = eval_program(p.arena, p.statements);
+    test_assert_m(result->tag == ObjectKind_Number, "expected number object");
+    test_assert_m(result->data.number.value == tests[i].expected,
+                  "expected number value '%lld', evaluated '%lld'",
+                  tests[i].expected,
+                  result->data.number.value);
+
+    parse_free(&p);
+  }
+
+  return 0;
+}
+
+internal int
+test_eval_let_stmt(void)
+{
+  struct
+  {
+    Str8 input;
+    s64 expected;
+  } tests[] = {
+    { str8_lit("let a = 5; a;"), 5 },
+    { str8_lit("let a = 5 * 5; a;"), 25 },
+    { str8_lit("let a = 5; let b = a; b;"), 5 },
+    { str8_lit("let a = 5; let b = a; let c = a + b + 5; c;"), 15 },
+  };
+
+  for (usize i = 0; i < arr_count(tests); i++)
+  {
+    Parser p = parse(tests[i].input);
+    test_helper(test_parse_check_messages(&p));
+
+    Object const *result = eval_program(p.arena, p.statements);
     test_assert_m(result->tag == ObjectKind_Number, "expected number object");
     test_assert_m(result->data.number.value == tests[i].expected,
                   "expected number value '%lld', evaluated '%lld'",
@@ -3425,6 +3588,10 @@ test_eval_error_handling(void)
       str8_lit("if (10 > 1) { true + false; }"),
       str8_lit("unknown operator: Boolean + Boolean"),
     },
+    {
+      str8_lit("foobar"),
+      str8_lit("identifier not found: foobar"),
+    },
   };
 
   for (usize i = 0; i < arr_count(tests); i++)
@@ -3432,7 +3599,7 @@ test_eval_error_handling(void)
     Parser p = parse(tests[i].input);
     test_helper(test_parse_check_messages(&p));
 
-    Object const *result = eval_program(p.statements, p.arena);
+    Object const *result = eval_program(p.arena, p.statements);
     test_assert_m(result->tag == ObjectKind_Error, "expected error object");
     test_assert_m(str8_equal(tests[i].expected, result->data.err.value),
                   "expected error '%.*s', evaluated '%.*s'",
@@ -3475,6 +3642,7 @@ test(void)
   result += test_eval_if_else_expr();
 
   result += test_eval_return_stmt();
+  result += test_eval_let_stmt();
 
   result += test_eval_error_handling();
 

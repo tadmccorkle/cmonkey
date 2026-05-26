@@ -60,3 +60,6 @@ obj/
 
 # scratch
 .scratch/
+
+# project config
+.nvim-dev.lua
