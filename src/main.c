@@ -22,9 +22,13 @@
 #define MiB(n) ((u64)(n) << 20)
 #define GiB(n) ((u64)(n) << 30)
 
-#define min(A, B)      (((A) < (B)) ? (A) : (B))
-#define max(A, B)      (((A) > (B)) ? (A) : (B))
-#define clamp(A, X, B) (((X) < (A)) ? (A) : ((X) > (B)) ? (B) : (X))
+#define min(a, b)      (((a) < (b)) ? (a) : (b))
+#define max(a, b)      (((a) > (b)) ? (a) : (b))
+#define clamp(a, x, b) (((x) < (a)) ? (a) : ((x) > (b)) ? (b) : (x))
+
+#define ceil_pos(T, x) ((x - (T)(x)) > 0 ? (T)(x + 1) : (T)(x))
+#define ceil_neg(T, x) (T)(x)
+#define ceil(T, x)     (((x) > 0) ? ceil_pos(x) : ceil_neg(x))
 
 #define align_up(p, a) (((usize)(p) + ((usize)(a) - 1)) & (~((usize)(a) - 1)))
 
@@ -1722,13 +1726,17 @@ env_hash(Str8 key)
 internal void
 env_init(Env *env, Arena *arena, u32 initial_capacity)
 {
-  u32 cap = max(initial_capacity, 1);
+  u32 cap = max(initial_capacity, 16);
 
   env->arena = arena;
+  env->outer = 0;
   env->cnt   = 0;
   env->cap   = cap;
   env->vars  = arena_alloc_tn(arena, EnvVar, cap);
 }
+
+#define env_init_count(env, arena, initial_count) \
+  env_init((env), (arena), ceil_pos(u32, (initial_count) / ENV_LOAD_FACTOR));
 
 internal EnvVar *
 env_find(Env const *env, Str8 name)
@@ -1807,8 +1815,9 @@ env_set(Env *env, Str8 name, Object const *value)
 #define OBJECT_KINDS(X) \
   X(Number)             \
   X(Boolean)            \
-  X(Null)               \
   X(Return)             \
+  X(Function)           \
+  X(Null)               \
   X(Error)
 
 typedef enum
@@ -1855,6 +1864,25 @@ struct ObjectReturn
   Object const *value;
 };
 
+// TODO(tad): Track number of function params and
+// make this an array instead of LL.
+typedef struct ObjectCallArg ObjectCallArg;
+struct ObjectCallArg
+{
+  ObjectCallArg *next;
+  Str8 name;
+  Object const *value;
+};
+
+// TODO(tad): Should this reference or copy parsed info?
+typedef struct ObjectFunction ObjectFunction;
+struct ObjectFunction
+{
+  AstExprFunctionParam *params;
+  AstStmtBlock *body;
+  Env *env;
+};
+
 typedef struct ObjectError ObjectError;
 struct ObjectError
 {
@@ -1869,6 +1897,7 @@ struct Object
     ObjectNumber number;
     ObjectBoolean boolean;
     ObjectReturn ret;
+    ObjectFunction function;
     ObjectNull null;
     ObjectError err;
   } data;
@@ -1886,6 +1915,26 @@ eval_inspect(Arena *arena, Object const *o)
     case ObjectKind_Number: return str8_f(arena, "%lld", o->data.number.value);
     case ObjectKind_Boolean: return o->data.boolean.value ? KEYWORD_TRUE : KEYWORD_FALSE;
     case ObjectKind_Return: return eval_inspect(arena, o->data.ret.value);
+    case ObjectKind_Function:
+    {
+      StrBuilder8 b = str8_builder_create_default(arena);
+      str8_append_lit(&b, "fn(");
+      if (o->data.function.params != 0)
+      {
+        AstExprFunctionParam *param = o->data.function.params;
+        for (;;)
+        {
+          str8_append(&b, param->identifier.token.value);
+          if ((param = param->next) == 0) break;
+          str8_append_lit(&b, ",");
+        }
+      }
+      str8_append_lit(&b, "){ ");
+      parse_build_stmt_string(&b, o->data.function.body->statements);
+      str8_append_lit(&b, " }");
+
+      return str8_build(&b);
+    }
     case ObjectKind_Null: return str8_lit("");
     case ObjectKind_Error: return str8_f(arena, "Error: %.*s", str8_va(o->data.err.value));
     default:
@@ -1910,24 +1959,9 @@ object_from_number(Arena *arena, s64 value)
 }
 
 internal Object const *
-object_from_error(Arena *arena, Str8 error)
-{
-  Object *result         = arena_alloc_t(arena, Object);
-  result->tag            = ObjectKind_Error;
-  result->data.err.value = error;
-  return result;
-}
-
-internal Object const *
 object_from_bool(bool value)
 {
   return value ? OBJECT_TRUE : OBJECT_FALSE;
-}
-
-internal bool
-object_is_error(Object const *object)
-{
-  return object->tag == ObjectKind_Error;
 }
 
 internal bool
@@ -1936,8 +1970,42 @@ object_is_truthy(Object const *object)
   // TODO(tad): Refactor to perform value comparison?
   // That would allow the environment to store object values instead of pointers,
   // which would enable freeing objects not bound to the environment.
+  //
+  // This might not be possible though. Functions objects reference AST nodes.
+  // Would need to be copied to support this.
   return object != OBJECT_NULL && object != OBJECT_FALSE;
 }
+
+internal Object const *
+object_from_function(Arena *arena, AstExprFunction fn, Env *env)
+{
+  Object *result               = arena_alloc_t(arena, Object);
+  result->tag                  = ObjectKind_Function;
+  result->data.function.params = fn.params;
+  result->data.function.body   = fn.body;
+  result->data.function.env    = env;
+  return result;
+}
+
+internal Object const *
+object_from_error(Arena *arena, Str8 error)
+{
+  Object *result         = arena_alloc_t(arena, Object);
+  result->tag            = ObjectKind_Error;
+  result->data.err.value = error;
+  return result;
+}
+
+internal bool
+object_is_error(Object const *object)
+{
+  return object->tag == ObjectKind_Error;
+}
+
+// TODO(tad): Currently using scratch arenas throughout, but that might be a problem.
+// Revisit when maps/arrays are implemented and decide if blanket deallocations are possible.
+//
+// If it is possible to do that, some places need to be changed to use scratch arenas (call evaluation).
 
 internal Object const *
 eval_expr_prefix(Arena *arena, AstExprPrefix prefix, Env *env)
@@ -2114,6 +2182,59 @@ eval_expr_if_else(Arena *arena, AstExprIfElse if_else, Env *env)
 }
 
 internal Object const *
+eval_call_expr(Arena *arena, AstExprCall call, Env *env)
+{
+  Object const *call_fn = eval_expr(arena, call.function, env);
+  if (object_is_error(call_fn)) return call_fn;
+
+  if (call_fn->tag != ObjectKind_Function)
+  {
+    Str8 error = str8_f(arena, "not a function: %.*s", str8_va(object_name(call_fn->tag)));
+    return object_from_error(arena, error);
+  }
+
+  ObjectFunction fn = call_fn->data.function;
+
+  SLL_BUILDER(ObjectCallArg) args;
+  sll_builder_init(args);
+
+  usize arg_count = 0;
+  AstExprCallArg *arg_expr;
+  AstExprFunctionParam *param_expr;
+  for (arg_expr = call.args, param_expr = fn.params; arg_expr != 0 && param_expr != 0;
+       arg_expr = arg_expr->next, param_expr = param_expr->next, arg_count += 1)
+  {
+    Object const *arg_value = eval_expr(arena, arg_expr->expr, env);
+    if (object_is_error(arg_value)) return arg_value;
+
+    ObjectCallArg *arg = arena_alloc_t(arena, ObjectCallArg);
+    arg->name          = param_expr->identifier.token.value;
+    arg->value         = arg_value;
+
+    sll_builder_append(args, arg);
+  }
+
+  if (arg_expr == 0 && param_expr != 0)
+  {
+    Str8 error =
+    str8_f(arena, "missing function parameter: %.*s", str8_va(param_expr->identifier.token.value));
+    return object_from_error(arena, error);
+  }
+
+  Env *extended_env = arena_alloc_t(arena, Env);
+  env_init_count(extended_env, arena, arg_count);
+  extended_env->outer = fn.env;
+
+  for (ObjectCallArg *arg = sll_builder_result(args); arg != 0; arg = arg->next)
+  {
+    env_set(extended_env, arg->name, arg->value);
+  }
+
+  Object const *result = eval_block(arena, fn.body, extended_env);
+  return result->tag == ObjectKind_Return ? result->data.ret.value : result;
+}
+
+internal Object const *
 eval_expr(Arena *arena, AstExpr *expr, Env *env)
 {
   switch (expr->tag)
@@ -2131,12 +2252,12 @@ eval_expr(Arena *arena, AstExpr *expr, Env *env)
     }
     case AstExpr_Number: return object_from_number(arena, expr->data.number.value);
     case AstExpr_Boolean: return object_from_bool(expr->data.boolean.value);
+    case AstExpr_Function: return object_from_function(arena, expr->data.function, env);
+
     case AstExpr_Prefix: return eval_expr_prefix(arena, expr->data.prefix, env);
     case AstExpr_Infix: return eval_expr_infix(arena, expr->data.infix, env);
     case AstExpr_IfElse: return eval_expr_if_else(arena, expr->data.if_else, env);
-
-    case AstExpr_Function: return OBJECT_NULL;
-    case AstExpr_Call: return OBJECT_NULL;
+    case AstExpr_Call: return eval_call_expr(arena, expr->data.call, env);
 
     default: return OBJECT_NULL;
   }
@@ -2152,8 +2273,11 @@ eval_stmt(Arena *arena, AstStmt *stmt, Env *env)
       Object const *value = eval_expr(arena, stmt->data.let.expr, env);
       if (object_is_error(value)) return value;
 
+      // TODO(tad): Was thinking this copy necessary, but the parser arena can't be freed
+      // with current function/call eval implementation.
       Str8 name = str8_copy(env->arena, stmt->data.let.identifier->token.value);
       env_set(env, name, value);
+
       return OBJECT_NULL;
     }
 
@@ -2375,7 +2499,9 @@ repl(void)
 
     TmpArena scratch = scratch_begin(0);
     Str8 input       = str8_from_cstr(buffer);
-    Parser p         = parse(scratch.arena, input);
+    // TODO(tad): Ideally would parse with scratch arena,
+    // but can't with current function implementation.
+    Parser p = parse(arena, input);
 
     parse_print_messages(&p);
 
@@ -3571,6 +3697,50 @@ test_eval_if_else_expr(void)
 }
 
 internal int
+test_eval_function_expr(void)
+{
+  struct
+  {
+    Str8 input;
+    s64 expected;
+  } tests[] = {
+    { str8_lit("let identity = fn(x) { x; }; identity(5);"), 5 },
+    { str8_lit("let identity = fn(x) { return x; }; identity(5);"), 5 },
+    { str8_lit("let double = fn(x) { x * 2; }; double(5);"), 10 },
+    { str8_lit("let add = fn(x, y) { x + y; }; add(5, 5);"), 10 },
+    { str8_lit("let add = fn(x, y) { x + y; }; add(5 + 5, add(5, 5));"), 20 },
+    { str8_lit("fn(x) { x; }(5)"), 5 },
+    { str8_lit("fn(a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t, u, v, w, x, y, z) {"
+               "a + b + c + d + e + f + g + h + i + j + k + l + m + n + o + p + q + r + s + t + u "
+               "+ v + w + x + y + z;"
+               "}(1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5, 6)"),
+      111 },
+  };
+
+  for (usize i = 0; i < arr_count(tests); i++)
+  {
+    TmpArena scratch = scratch_begin(0);
+
+    Parser p = parse(scratch.arena, tests[i].input);
+    test_helper(test_parse_check_messages(&p));
+
+    Env env = { 0 };
+    env_init(&env, scratch.arena, 0);
+
+    Object const *result = eval_program(scratch.arena, p.statements, &env);
+    test_assert_m(result->tag == ObjectKind_Number, "expected number object");
+    test_assert_m(result->data.number.value == tests[i].expected,
+                  "expected number value '%lld', evaluated '%lld'",
+                  tests[i].expected,
+                  result->data.number.value);
+
+    scratch_end(scratch);
+  }
+
+  return 0;
+}
+
+internal int
 test_eval_return_stmt(void)
 {
   struct
@@ -3630,7 +3800,7 @@ test_eval_let_stmt(void)
     test_helper(test_parse_check_messages(&p));
 
     Env env = { 0 };
-    env_init(&env, scratch.arena, 8);
+    env_init(&env, scratch.arena, 0);
 
     Object const *result = eval_program(scratch.arena, p.statements, &env);
     test_assert_m(result->tag == ObjectKind_Number, "expected number object");
@@ -3734,11 +3904,40 @@ test(void)
   result += test_eval_boolean_expr();
   result += test_eval_bang();
   result += test_eval_if_else_expr();
+  result += test_eval_function_expr();
 
   result += test_eval_return_stmt();
   result += test_eval_let_stmt();
 
   result += test_eval_error_handling();
+
+  // TODO(tad): test environment
+  // TODO(tad): investigate memory bug:
+  //   tad@mini::cmonkey ‹main› » ./run.sh
+  //   >> let x = 1
+  //   >> x
+  //   1
+  //   >> fn(y){x+y}(2)
+  //   3
+  //   >> let x = fn(x) { fn(y) { x + y } }
+  //   >> x
+  //   fn(x){ fn(y){ (x + y) } }
+  //   >> x(1)(2)
+  //   3
+  //   >> x(1)
+  //   fn(y){ (x + y) }
+  //   >> let addEight = x(8)
+  //   >> addEight(2)
+  //   Error: Error: ier not found: y
+  //   >> addEight(2)
+  //   Error: Error: ier not found: y
+  //   >> addEight
+  //   fn(
+  //   ){ (x + y) }
+  //   >> x
+  //   fn(
+  //   ){ fn(
+  //   ){ (x + y) } }
 
   return result;
 }
