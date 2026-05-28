@@ -2497,23 +2497,20 @@ repl(void)
       }
     }
 
-    TmpArena scratch = scratch_begin(0);
-    Str8 input       = str8_from_cstr(buffer);
-    // TODO(tad): Ideally would parse with scratch arena,
-    // but can't with current function implementation.
-    Parser p = parse(arena, input);
+    Str8 input = str8_copy(arena, str8_from_cstr(buffer));
+    Parser p   = parse(arena, input);
 
     parse_print_messages(&p);
 
     if (p.message_list.level < MessageLevel_Error)
     {
       Object const *result = eval_program(arena, p.statements, &env);
-      Str8 output          = eval_inspect(scratch.arena, result);
 
+      TmpArena scratch = scratch_begin(0);
+      Str8 output      = eval_inspect(scratch.arena, result);
       if (output.len > 0) printf("%.*s\n", str8_va(output));
+      scratch_end(scratch);
     }
-
-    scratch_end(scratch);
 
     print_prompt = input.buf[input.len - 1] == '\n';
   }
@@ -3912,32 +3909,6 @@ test(void)
   result += test_eval_error_handling();
 
   // TODO(tad): test environment
-  // TODO(tad): investigate memory bug:
-  //   tad@mini::cmonkey ‹main› » ./run.sh
-  //   >> let x = 1
-  //   >> x
-  //   1
-  //   >> fn(y){x+y}(2)
-  //   3
-  //   >> let x = fn(x) { fn(y) { x + y } }
-  //   >> x
-  //   fn(x){ fn(y){ (x + y) } }
-  //   >> x(1)(2)
-  //   3
-  //   >> x(1)
-  //   fn(y){ (x + y) }
-  //   >> let addEight = x(8)
-  //   >> addEight(2)
-  //   Error: Error: ier not found: y
-  //   >> addEight(2)
-  //   Error: Error: ier not found: y
-  //   >> addEight
-  //   fn(
-  //   ){ (x + y) }
-  //   >> x
-  //   fn(
-  //   ){ fn(
-  //   ){ (x + y) } }
 
   return result;
 }
