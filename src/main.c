@@ -87,6 +87,7 @@ typedef b8 bool;
   {                    \
     T sentinel;        \
     T *tail;           \
+    usize count;       \
   }
 
 #define sll_builder_init(b)            \
@@ -94,9 +95,15 @@ typedef b8 bool;
   {                                    \
     (b).tail          = &(b).sentinel; \
     (b).sentinel.next = 0;             \
+    (b).count         = 0;             \
   } while (0)
 
-#define sll_builder_append(b, n) sll_append((b).tail, (n))
+#define sll_builder_append(b, n) \
+  do                             \
+  {                              \
+    sll_append((b).tail, (n));   \
+    (b).count++;                 \
+  } while (0)
 
 #define sll_builder_result(b) (b).sentinel.next
 
@@ -171,6 +178,8 @@ arena_alloc(Arena *arena, usize size, usize align, ArenaOpt opts)
       new_size = size;
     }
 
+    // TODO(tad): remove print
+    printf("Creating new arena block\n");
     ArenaBlock *new_block = arena_block_create(new_size);
     new_block->prev       = block;
     arena->current        = new_block;
@@ -318,14 +327,6 @@ scratch_begin(Arena *conflict)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunused-function"
 
-internal usize
-cstr_length(char const *c)
-{
-  char const *p = c;
-  for (; *p != 0; p++);
-  return (usize)(p - c);
-}
-
 typedef struct Str8 Str8;
 struct Str8
 {
@@ -379,7 +380,7 @@ str8_f(Arena *arena, char const *fmt, ...)
 internal Str8
 str8_from_cstr(char const *c)
 {
-  return str8((u8 const *)c, cstr_length(c));
+  return str8((u8 const *)c, strlen(c));
 }
 
 internal Str8
@@ -493,7 +494,7 @@ str8_build(StrBuilder8 *builder)
 }
 
 internal Str8
-str8_build_to_arena(StrBuilder8 *builder, Arena *arena)
+str8_dump(StrBuilder8 *builder, Arena *arena)
 {
   u8 *buf = arena_alloc_tn_nz(arena, u8, builder->len + 1);
   memcpy(buf, builder->buf, builder->len);
@@ -857,41 +858,41 @@ typedef struct AstExpr AstExpr;
 typedef struct AstStmtBlock AstStmtBlock;
 struct AstStmtBlock
 {
-  Token token;
+  Token token; // The '{' token
   AstStmt *statements;
 };
 
 typedef struct AstExprIdentifier AstExprIdentifier;
 struct AstExprIdentifier
 {
-  Token token;
+  Token token; // The identifier token
 };
 
 typedef struct AstExprNumber AstExprNumber;
 struct AstExprNumber
 {
-  Token token;
+  Token token; // The integer number token
   s64 value;
 };
 
 typedef struct AstExprBoolean AstExprBoolean;
 struct AstExprBoolean
 {
-  Token token;
+  Token token; // The boolean token
   b8 value;
 };
 
 typedef struct AstExprPrefix AstExprPrefix;
 struct AstExprPrefix
 {
-  Token token;
+  Token token; // The prefix token, e.g., '!'
   AstExpr *rhs;
 };
 
 typedef struct AstExprInfix AstExprInfix;
 struct AstExprInfix
 {
-  Token token;
+  Token token; // The infix operator token, e.g., '+'
   AstExpr *lhs;
   AstExpr *rhs;
 };
@@ -899,7 +900,7 @@ struct AstExprInfix
 typedef struct AstExprIfElse AstExprIfElse;
 struct AstExprIfElse
 {
-  Token token;
+  Token token; // The 'if' token
   AstExpr *condition;
   AstStmtBlock *consequence;
   AstStmtBlock *alternative;
@@ -915,8 +916,9 @@ struct AstExprFunctionParam
 typedef struct AstExprFunction AstExprFunction;
 struct AstExprFunction
 {
-  Token token;
+  Token token; // The 'fn' token
   AstExprFunctionParam *params;
+  u8 param_count;
   AstStmtBlock *body;
 };
 
@@ -930,9 +932,10 @@ struct AstExprCallArg
 typedef struct AstExprCall AstExprCall;
 struct AstExprCall
 {
-  Token token;
+  Token token; // The '(' token
   AstExpr *function;
   AstExprCallArg *args;
+  u8 arg_count;
 };
 
 struct AstExpr
@@ -961,7 +964,7 @@ typedef enum
 typedef struct AstStmtLet AstStmtLet;
 struct AstStmtLet
 {
-  Token token;
+  Token token; // The 'let' token
   AstExprIdentifier *identifier;
   AstExpr *expr;
 };
@@ -969,14 +972,14 @@ struct AstStmtLet
 typedef struct AstStmtReturn AstStmtReturn;
 struct AstStmtReturn
 {
-  Token token;
+  Token token; // The 'return' token
   AstExpr *expr;
 };
 
 typedef struct AstStmtExpr AstStmtExpr;
 struct AstStmtExpr
 {
-  Token token;
+  Token token; // The first token of the expression
   AstExpr *expr;
 };
 
@@ -1126,16 +1129,6 @@ parse_build_stmt_string(StrBuilder8 *b, AstStmt *statements)
       default: str8_append_lit(b, "[INVALID STATEMENT TAG]"); break;
     }
   }
-}
-
-// NOTE(tad): This is entirely for debugging/testing purposes and should not otherwise be used.
-internal Str8
-parse_to_string(Parser *p)
-{
-  StrBuilder8 b = str8_builder_create(p->arena, KiB(1));
-  parse_build_stmt_string(&b, p->statements);
-
-  return str8_build(&b);
 }
 
 internal void
@@ -1354,7 +1347,18 @@ parse_expr_function(Parser *p)
       }
     }
 
-    expr->data.function.params = sll_builder_result(params);
+    if (params.count != (u8)params.count)
+    {
+      is_valid = false;
+
+      Str8 error = str8_f(p->arena,
+                          "Function defined with '%zu' parameters, more than max supported '255'.",
+                          params.count);
+      parse_error(p, MessageLevel_Error, error);
+    }
+
+    expr->data.function.params      = sll_builder_result(params);
+    expr->data.function.param_count = params.count;
   }
   else
   {
@@ -1463,7 +1467,16 @@ parse_expr_call(Parser *p, AstExpr *lhs)
       }
     }
 
-    call->data.call.args = sll_builder_result(args);
+    if (args.count != (u8)args.count)
+    {
+      Str8 error = str8_f(p->arena,
+                          "Function call provided '%zu' arguments, more than max supported '255'.",
+                          args.count);
+      parse_error(p, MessageLevel_Error, error);
+    }
+
+    call->data.call.args      = sll_builder_result(args);
+    call->data.call.arg_count = (u8)args.count;
   }
   else
   {
@@ -1514,44 +1527,6 @@ parse_stmt(Parser *p)
 
   switch (p->curr_token.kind)
   {
-    case TokenKind_Identifier:
-    case TokenKind_Number:
-    case TokenKind_Assign:
-    case TokenKind_Plus:
-    case TokenKind_Minus:
-    case TokenKind_Bang:
-    case TokenKind_Star:
-    case TokenKind_Slash:
-    case TokenKind_Less:
-    case TokenKind_Greater:
-    case TokenKind_Equal:
-    case TokenKind_NotEqual:
-    case TokenKind_Comma:
-    case TokenKind_LParen:
-    case TokenKind_RParen:
-    case TokenKind_LBrace:
-    case TokenKind_RBrace:
-    case TokenKind_LBracket:
-    case TokenKind_RBracket:
-    case TokenKind_Function:
-    case TokenKind_True:
-    case TokenKind_False:
-    case TokenKind_If:
-    case TokenKind_Else:
-    {
-      stmt                  = arena_alloc_t(p->arena, AstStmt);
-      stmt->tag             = AstStmt_Expr;
-      stmt->data.expr.token = p->curr_token;
-      stmt->data.expr.expr  = parse_expr(p, Precedence_Lowest);
-
-      if (p->peek_token.kind == TokenKind_Semicolon)
-      {
-        parse_advance_token(p);
-      }
-
-      break;
-    }
-
     case TokenKind_Let:
     {
       Token let_token   = p->curr_token;
@@ -1561,16 +1536,12 @@ parse_stmt(Parser *p)
 
       parse_advance_token(p);
 
-      stmt                          = arena_alloc_t(p->arena, AstStmt);
-      AstExprIdentifier *identifier = arena_alloc_t(p->arena, AstExprIdentifier);
-      AstExpr *expr                 = parse_expr(p, Precedence_Lowest);
-
-      identifier->token = ident_token;
-
-      stmt->tag                 = AstStmt_Let;
-      stmt->data.let.token      = let_token;
-      stmt->data.let.identifier = identifier;
-      stmt->data.let.expr       = expr;
+      stmt                             = arena_alloc_t(p->arena, AstStmt);
+      stmt->tag                        = AstStmt_Let;
+      stmt->data.let.token             = let_token;
+      stmt->data.let.identifier        = arena_alloc_t(p->arena, AstExprIdentifier);
+      stmt->data.let.identifier->token = ident_token;
+      stmt->data.let.expr              = parse_expr(p, Precedence_Lowest);
 
       if (p->peek_token.kind == TokenKind_Semicolon)
       {
@@ -1586,12 +1557,10 @@ parse_stmt(Parser *p)
 
       parse_advance_token(p);
 
-      stmt          = arena_alloc_t(p->arena, AstStmt);
-      AstExpr *expr = parse_expr(p, Precedence_Lowest);
-
+      stmt                 = arena_alloc_t(p->arena, AstStmt);
       stmt->tag            = AstStmt_Ret;
       stmt->data.ret.token = ret_token;
-      stmt->data.ret.expr  = expr;
+      stmt->data.ret.expr  = parse_expr(p, Precedence_Lowest);
 
       if (p->peek_token.kind == TokenKind_Semicolon)
       {
@@ -1617,7 +1586,22 @@ parse_stmt(Parser *p)
 
     case TokenKind_EOF: assert(0 && "EOF tokens are checked by outer loop condition."); break;
 
-    default: assert(0 && "Tokenizer produced invalid token."); break;
+    default:
+    {
+      Token expr_token = p->curr_token;
+
+      stmt                  = arena_alloc_t(p->arena, AstStmt);
+      stmt->tag             = AstStmt_Expr;
+      stmt->data.expr.token = expr_token;
+      stmt->data.expr.expr  = parse_expr(p, Precedence_Lowest);
+
+      if (p->peek_token.kind == TokenKind_Semicolon)
+      {
+        parse_advance_token(p);
+      }
+
+      break;
+    }
   }
 
   return stmt;
@@ -1769,7 +1753,7 @@ env_grow(Env *env)
   memcpy(old_vars, env->vars, old_cap * sizeof(*env->vars));
 
   EnvVar *new_vars = arena_realloc_t_nz(env->arena, env->vars, EnvVar, env->cap, new_cap);
-  memset(env->vars, 0, new_cap * sizeof(*env->vars));
+  memset(new_vars, 0, new_cap * sizeof(*env->vars));
 
   env->vars = new_vars;
   env->cap  = new_cap;
@@ -1790,8 +1774,13 @@ env_grow(Env *env)
 internal Object const *
 env_get(Env const *env, Str8 name)
 {
-  Object const *value = env_find(env, name)->value;
-  return value == 0 && env->outer != 0 ? env_get(env->outer, name) : value;
+  Object const *value;
+  for (; env != 0; env = env->outer)
+  {
+    value = env_find(env, name)->value;
+    if (value != 0) break;
+  }
+  return value;
 }
 
 internal void
@@ -1864,17 +1853,6 @@ struct ObjectReturn
   Object const *value;
 };
 
-// TODO(tad): Track number of function params and
-// make this an array instead of LL.
-typedef struct ObjectCallArg ObjectCallArg;
-struct ObjectCallArg
-{
-  ObjectCallArg *next;
-  Str8 name;
-  Object const *value;
-};
-
-// TODO(tad): Should this reference or copy parsed info?
 typedef struct ObjectFunction ObjectFunction;
 struct ObjectFunction
 {
@@ -1967,13 +1945,8 @@ object_from_bool(bool value)
 internal bool
 object_is_truthy(Object const *object)
 {
-  // TODO(tad): Refactor to perform value comparison?
-  // That would allow the environment to store object values instead of pointers,
-  // which would enable freeing objects not bound to the environment.
-  //
-  // This might not be possible though. Functions objects reference AST nodes.
-  // Would need to be copied to support this.
-  return object != OBJECT_NULL && object != OBJECT_FALSE;
+  return object->tag != ObjectKind_Null &&
+         (object->tag != ObjectKind_Boolean || object->data.boolean.value);
 }
 
 internal Object const *
@@ -2002,11 +1975,6 @@ object_is_error(Object const *object)
   return object->tag == ObjectKind_Error;
 }
 
-// TODO(tad): Currently using scratch arenas throughout, but that might be a problem.
-// Revisit when maps/arrays are implemented and decide if blanket deallocations are possible.
-//
-// If it is possible to do that, some places need to be changed to use scratch arenas (call evaluation).
-
 internal Object const *
 eval_expr_prefix(Arena *arena, AstExprPrefix prefix, Env *env)
 {
@@ -2016,8 +1984,7 @@ eval_expr_prefix(Arena *arena, AstExprPrefix prefix, Env *env)
   {
     case TokenKind_Bang:
     {
-      TmpArena scratch  = scratch_begin(arena);
-      Object const *rhs = eval_expr(scratch.arena, prefix.rhs, env);
+      Object const *rhs = eval_expr(arena, prefix.rhs, env);
       if (object_is_error(rhs))
       {
         result = object_from_error(arena, rhs->data.err.value);
@@ -2026,14 +1993,12 @@ eval_expr_prefix(Arena *arena, AstExprPrefix prefix, Env *env)
       {
         result = object_from_bool(!object_is_truthy(rhs));
       }
-      scratch_end(scratch);
       break;
     }
 
     case TokenKind_Minus:
     {
-      TmpArena scratch  = scratch_begin(arena);
-      Object const *rhs = eval_expr(scratch.arena, prefix.rhs, env);
+      Object const *rhs = eval_expr(arena, prefix.rhs, env);
       if (object_is_error(rhs))
       {
         result = object_from_error(arena, rhs->data.err.value);
@@ -2047,7 +2012,6 @@ eval_expr_prefix(Arena *arena, AstExprPrefix prefix, Env *env)
       {
         result = object_from_number(arena, -rhs->data.number.value);
       }
-      scratch_end(scratch);
       break;
     }
 
@@ -2067,11 +2031,10 @@ eval_expr_prefix(Arena *arena, AstExprPrefix prefix, Env *env)
 internal Object const *
 eval_expr_infix(Arena *arena, AstExprInfix infix, Env *env)
 {
-  TmpArena scratch  = scratch_begin(arena);
-  Object const *lhs = eval_expr(scratch.arena, infix.lhs, env);
-  Object const *rhs = eval_expr(scratch.arena, infix.rhs, env);
-
   Object const *result;
+
+  Object const *lhs = eval_expr(arena, infix.lhs, env);
+  Object const *rhs = eval_expr(arena, infix.rhs, env);
 
   if (object_is_error(lhs))
   {
@@ -2125,6 +2088,8 @@ eval_expr_infix(Arena *arena, AstExprInfix infix, Env *env)
   {
     switch (infix.token.kind)
     {
+      // NOTE(tad): Non-number equality is determined by reference comparisons.
+      // Boolean and null objects should always reference singletons.
       case TokenKind_Equal: result = object_from_bool(lhs == rhs); break;
       case TokenKind_NotEqual: result = object_from_bool(lhs != rhs); break;
       default:
@@ -2152,33 +2117,28 @@ eval_expr_infix(Arena *arena, AstExprInfix infix, Env *env)
     }
   }
 
-  scratch_end(scratch);
-
   return result;
 }
 
 internal Object const *
 eval_expr_if_else(Arena *arena, AstExprIfElse if_else, Env *env)
 {
-  TmpArena tmp            = arena_tmp_begin(arena);
-  Object const *condition = eval_expr(tmp.arena, if_else.condition, env);
-  if (object_is_error(condition)) return condition;
+  Object const *condition = eval_expr(arena, if_else.condition, env);
 
-  bool is_true = object_is_truthy(condition);
-  arena_tmp_end(tmp);
-
-  if (is_true)
+  if (object_is_error(condition))
+  {
+    return condition;
+  }
+  if (object_is_truthy(condition))
   {
     return eval_block(arena, if_else.consequence, env);
   }
-  else if (if_else.alternative != 0)
+  if (if_else.alternative != 0)
   {
     return eval_block(arena, if_else.alternative, env);
   }
-  else
-  {
-    return OBJECT_NULL;
-  }
+
+  return OBJECT_NULL;
 }
 
 internal Object const *
@@ -2193,28 +2153,34 @@ eval_call_expr(Arena *arena, AstExprCall call, Env *env)
     return object_from_error(arena, error);
   }
 
-  ObjectFunction fn = call_fn->data.function;
+  // TODO(tad): Need to check the env arena, too.
+  TmpArena scratch = scratch_begin(arena);
 
-  SLL_BUILDER(ObjectCallArg) args;
-  sll_builder_init(args);
+  struct CallArgBinding
+  {
+    Str8 name;
+    Object const *value;
+  };
 
-  usize arg_count = 0;
-  AstExprCallArg *arg_expr;
-  AstExprFunctionParam *param_expr;
-  for (arg_expr = call.args, param_expr = fn.params; arg_expr != 0 && param_expr != 0;
-       arg_expr = arg_expr->next, param_expr = param_expr->next, arg_count += 1)
+  struct CallArgBinding *args = arena_alloc_tn(scratch.arena, struct CallArgBinding, call.arg_count);
+
+  u8 arg_index                     = 0;
+  AstExprCallArg *arg_expr         = call.args;
+  AstExprFunctionParam *param_expr = call_fn->data.function.params;
+  while (arg_expr != 0 && param_expr != 0 && arg_index < call.arg_count)
   {
     Object const *arg_value = eval_expr(arena, arg_expr->expr, env);
     if (object_is_error(arg_value)) return arg_value;
 
-    ObjectCallArg *arg = arena_alloc_t(arena, ObjectCallArg);
-    arg->name          = param_expr->identifier.token.value;
-    arg->value         = arg_value;
+    args[arg_index].name  = param_expr->identifier.token.value;
+    args[arg_index].value = arg_value;
 
-    sll_builder_append(args, arg);
+    arg_index += 1;
+    arg_expr   = arg_expr->next;
+    param_expr = param_expr->next;
   }
 
-  if (arg_expr == 0 && param_expr != 0)
+  if (param_expr != 0)
   {
     Str8 error =
     str8_f(arena, "missing function parameter: %.*s", str8_va(param_expr->identifier.token.value));
@@ -2222,15 +2188,17 @@ eval_call_expr(Arena *arena, AstExprCall call, Env *env)
   }
 
   Env *extended_env = arena_alloc_t(arena, Env);
-  env_init_count(extended_env, arena, arg_count);
-  extended_env->outer = fn.env;
+  env_init_count(extended_env, arena, call.arg_count);
+  extended_env->outer = call_fn->data.function.env;
 
-  for (ObjectCallArg *arg = sll_builder_result(args); arg != 0; arg = arg->next)
+  for (u8 i = 0; i < arg_index; i++)
   {
-    env_set(extended_env, arg->name, arg->value);
+    env_set(extended_env, args[i].name, args[i].value);
   }
 
-  Object const *result = eval_block(arena, fn.body, extended_env);
+  scratch_end(scratch);
+
+  Object const *result = eval_block(arena, call_fn->data.function.body, extended_env);
   return result->tag == ObjectKind_Return ? result->data.ret.value : result;
 }
 
@@ -2273,17 +2241,14 @@ eval_stmt(Arena *arena, AstStmt *stmt, Env *env)
       Object const *value = eval_expr(arena, stmt->data.let.expr, env);
       if (object_is_error(value)) return value;
 
-      // TODO(tad): Was thinking this copy necessary, but the parser arena can't be freed
-      // with current function/call eval implementation.
-      Str8 name = str8_copy(env->arena, stmt->data.let.identifier->token.value);
-      env_set(env, name, value);
+      env_set(env, stmt->data.let.identifier->token.value, value);
 
       return OBJECT_NULL;
     }
 
     case AstStmt_Ret:
     {
-      Object const *ret_value = eval_expr(arena, stmt->data.expr.expr, env);
+      Object const *ret_value = eval_expr(arena, stmt->data.ret.expr, env);
       if (object_is_error(ret_value)) return ret_value;
 
       Object *ret         = arena_alloc_t(arena, Object);
@@ -2315,8 +2280,9 @@ eval_block(Arena *arena, AstStmtBlock *block, Env *env)
 }
 
 // TODO(tad): This doesn't do any sort of memory management yet. While some intermediate
-// evaluations are freed after use, any objects saved to an environment and environments
-// themselves live for the life of the program (or until the provided arena is freed).
+// evaluations are freed after use (and this might actually introduce bugs), any objects
+// saved to an environment and environments themselves live for the life of the program
+// (or until the provided arena is freed).
 //
 // Consider a simple GC implementation. Maybe a free list built on top of arenas?
 internal Object const *
@@ -2455,7 +2421,9 @@ rppl(void)
 
     if (p.message_list.level < MessageLevel_Error)
     {
-      printf("%.*s\n", str8_va(parse_to_string(&p)));
+      StrBuilder8 b = str8_builder_create_default(scratch.arena);
+      parse_build_stmt_string(&b, p.statements);
+      printf("%.*s\n", str8_va(str8_build(&b)));
     }
 
     scratch_end(scratch);
@@ -2523,25 +2491,37 @@ repl(void)
 // assertion macros collected failure messages for general use. This would also make it easier
 // to build failure stack traces (currently handled by printing).
 
+#if defined(_WIN32) || defined(_WIN64)
+#  include <io.h>
+#  define is_term(stream) _isatty(_fileno(stream))
+#else
+#  include <unistd.h>
+#  define is_term(stream) isatty(fileno(stream))
+#endif
+
 #define test_fail(fmt, ...) test_assert_m(false, fmt, ##__VA_ARGS__)
 #define test_assert(test)   test_assert_m(test, "test error")
-#define test_assert_m(test, fmt, ...)                                                           \
-  do                                                                                            \
-  {                                                                                             \
-    if (!(test))                                                                                \
-    {                                                                                           \
-      printf("\033[0;31m(%s:%d) failure: " fmt "\033[0m\n", __func__, __LINE__, ##__VA_ARGS__); \
-      return 1;                                                                                 \
-    }                                                                                           \
+#define test_assert_m(test, fmt, ...)            \
+  do                                             \
+  {                                              \
+    if (!(test))                                 \
+    {                                            \
+      printf("%s:%d: ", __FILE__, __LINE__);     \
+      if (is_term(stdout)) printf("\033[0;31m"); \
+      printf("failure in %s:", __func__);        \
+      if (is_term(stdout)) printf("\033[0m");    \
+      printf(" " fmt "\n", ##__VA_ARGS__);       \
+      return 1;                                  \
+    }                                            \
   } while (0)
-#define test_helper(help)                                          \
-  do                                                               \
-  {                                                                \
-    if (help)                                                      \
-    {                                                              \
-      printf("\033[0;31m-> (%s:%d)\033[0m\n", __func__, __LINE__); \
-      return 1;                                                    \
-    }                                                              \
+#define test_helper(help)                                    \
+  do                                                         \
+  {                                                          \
+    if (help)                                                \
+    {                                                        \
+      printf("| %s:%d: %s\n", __FILE__, __LINE__, __func__); \
+      return 1;                                              \
+    }                                                        \
   } while (0)
 
 internal int
@@ -3490,7 +3470,9 @@ test_parse_op_precedence(void)
     Parser p = parse(scratch.arena, tests[i].input);
     test_helper(test_parse_check_messages(&p));
 
-    Str8 actual = parse_to_string(&p);
+    StrBuilder8 b = str8_builder_create_default(scratch.arena);
+    parse_build_stmt_string(&b, p.statements);
+    Str8 actual = str8_build(&b);
 
     test_assert_m(str8_equal(tests[i].expected, actual),
                   "expected precedence of '%.*s', parsed '%.*s'",
@@ -3847,6 +3829,10 @@ test_eval_error_handling(void)
     {
       str8_lit("foobar"),
       str8_lit("identifier not found: foobar"),
+    },
+    {
+      str8_lit("let f = fn() { x; }; f();"),
+      str8_lit("identifier not found: x"),
     },
   };
 
