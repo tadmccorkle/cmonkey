@@ -1371,7 +1371,7 @@ parse_expr_function(Parser *p)
     }
 
     expr->data.function.params      = sll_builder_result(params);
-    expr->data.function.param_count = params.count;
+    expr->data.function.param_count = (u8)params.count;
   }
   else
   {
@@ -1788,11 +1788,12 @@ internal Object const *
 env_get(Env const *env, Str8 name)
 {
   Object const *value;
-  for (; env != 0; env = env->outer)
+  do
   {
     value = env_find(env, name)->value;
     if (value != 0) break;
-  }
+    env = env->outer;
+  } while (env != 0);
   return value;
 }
 
@@ -3502,6 +3503,166 @@ test_parse_op_precedence(void)
 }
 
 internal int
+test_env_set_get(void)
+{
+  TmpArena scratch = scratch_begin(0);
+
+  Env env = { 0 };
+  env_init(&env, scratch.arena, 0);
+
+  Str8 name           = str8_lit("x");
+  Object const *value = object_from_number(scratch.arena, 5);
+  env_set(&env, name, value);
+
+  test_assert_m(env.cnt == 1, "expected env count of 1, got %u", env.cnt);
+
+  Object const *got = env_get(&env, name);
+  test_assert_m(got != 0, "expected to find '%.*s' in environment", str8_va(name));
+  test_assert_m(got == value, "expected env_get to return inserted value pointer");
+
+  scratch_end(scratch);
+  return 0;
+}
+
+internal int
+test_env_get_missing(void)
+{
+  TmpArena scratch = scratch_begin(0);
+
+  Env env = { 0 };
+  env_init(&env, scratch.arena, 0);
+
+  test_assert_m(env_get(&env, str8_lit("missing")) == 0,
+                "expected null result for missing identifier in empty env");
+
+  env_set(&env, str8_lit("present"), object_from_number(scratch.arena, 1));
+  test_assert_m(env_get(&env, str8_lit("missing")) == 0,
+                "expected null result for missing identifier in populated env");
+
+  scratch_end(scratch);
+  return 0;
+}
+
+internal int
+test_env_overwrite(void)
+{
+  TmpArena scratch = scratch_begin(0);
+
+  Env env = { 0 };
+  env_init(&env, scratch.arena, 0);
+
+  Str8 name            = str8_lit("x");
+  Object const *first  = object_from_number(scratch.arena, 1);
+  Object const *second = object_from_number(scratch.arena, 2);
+
+  env_set(&env, name, first);
+  env_set(&env, name, second);
+
+  test_assert_m(env.cnt == 1, "expected count of 1 after overwrite, got %u", env.cnt);
+
+  Object const *got = env_get(&env, name);
+  test_assert_m(got == second, "expected env_get to return most recently set value");
+
+  scratch_end(scratch);
+  return 0;
+}
+
+internal int
+test_env_outer_scope(void)
+{
+  TmpArena scratch = scratch_begin(0);
+
+  Env outer = { 0 };
+  env_init(&outer, scratch.arena, 0);
+  env_set(&outer, str8_lit("outer_only"), object_from_number(scratch.arena, 1));
+  env_set(&outer, str8_lit("shadowed"), object_from_number(scratch.arena, 2));
+
+  Env inner = { 0 };
+  env_init(&inner, scratch.arena, 0);
+  inner.outer = &outer;
+  env_set(&inner, str8_lit("inner_only"), object_from_number(scratch.arena, 3));
+  env_set(&inner, str8_lit("shadowed"), object_from_number(scratch.arena, 4));
+
+  Object const *o = env_get(&inner, str8_lit("outer_only"));
+  test_assert_m(o != 0, "expected to find outer-only identifier via inner scope");
+  test_assert_m(o->tag == ObjectKind_Number, "expected number object for outer-only identifier");
+  test_assert_m(o->data.number.value == 1, "expected outer-only value 1, got %lld", o->data.number.value);
+
+  Object const *i = env_get(&inner, str8_lit("inner_only"));
+  test_assert_m(i != 0, "expected to find inner-only identifier in inner scope");
+  test_assert_m(i->tag == ObjectKind_Number, "expected number object for inner-only identifier");
+  test_assert_m(i->data.number.value == 3, "expected inner-only value 3, got %lld", i->data.number.value);
+
+  Object const *s = env_get(&inner, str8_lit("shadowed"));
+  test_assert_m(s != 0, "expected to find shadowed identifier in inner scope");
+  test_assert_m(s->tag == ObjectKind_Number, "expected number object for shadowed identifier");
+  test_assert_m(s->data.number.value == 4,
+                "expected inner scope to shadow outer value, got %lld",
+                s->data.number.value);
+
+  Object const *os = env_get(&outer, str8_lit("shadowed"));
+  test_assert_m(os != 0, "expected to find shadowed identifier in outer scope");
+  test_assert_m(os->data.number.value == 2,
+                "expected outer scope's shadowed value to be unchanged, got %lld",
+                os->data.number.value);
+
+  test_assert_m(env_get(&outer, str8_lit("inner_only")) == 0,
+                "expected inner-only identifier to be invisible from outer scope");
+
+  scratch_end(scratch);
+  return 0;
+}
+
+internal int
+test_env_grow(void)
+{
+  TmpArena scratch = scratch_begin(0);
+
+  Env env = { 0 };
+  env_init(&env, scratch.arena, 0);
+  u32 initial_cap = env.cap;
+
+  enum
+  {
+    insert_count = 64
+  };
+  Str8 names[insert_count];
+
+  for (s64 i = 0; i < insert_count; i++)
+  {
+    StrBuilder8 b = str8_builder_create_default(scratch.arena);
+    str8_append_f(&b, "var_%lld", i);
+    names[i] = str8_build(&b);
+    env_set(&env, names[i], object_from_number(scratch.arena, i));
+  }
+
+  test_assert_m(env.cap > initial_cap,
+                "expected capacity to grow beyond %u after %d inserts, got %u",
+                initial_cap,
+                insert_count,
+                env.cap);
+  test_assert_m(env.cnt == insert_count,
+                "expected count of %d after inserts, got %u",
+                insert_count,
+                env.cnt);
+
+  for (s64 i = 0; i < insert_count; i++)
+  {
+    Object const *got = env_get(&env, names[i]);
+    test_assert_m(got != 0, "expected to find '%.*s' in grown env", str8_va(names[i]));
+    test_assert_m(got->tag == ObjectKind_Number, "expected number object for '%.*s'", str8_va(names[i]));
+    test_assert_m(got->data.number.value == i,
+                  "expected value %lld for '%.*s', got %lld",
+                  i,
+                  str8_va(names[i]),
+                  got->data.number.value);
+  }
+
+  scratch_end(scratch);
+  return 0;
+}
+
+internal int
 test_eval_number_expr(void)
 {
   struct
@@ -3899,6 +4060,12 @@ test(void)
 
   result += test_parse_op_precedence();
 
+  result += test_env_set_get();
+  result += test_env_get_missing();
+  result += test_env_overwrite();
+  result += test_env_outer_scope();
+  result += test_env_grow();
+
   result += test_eval_number_expr();
   result += test_eval_boolean_expr();
   result += test_eval_bang();
@@ -3909,8 +4076,6 @@ test(void)
   result += test_eval_let_stmt();
 
   result += test_eval_error_handling();
-
-  // TODO(tad): test environment
 
   return result;
 }
