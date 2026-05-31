@@ -294,8 +294,8 @@ arena_tmp_end(TmpArena tmp)
 
 internal per_thread Arena *tl_scratch_arenas[SCRATCH_ARENA_COUNT];
 
-internal TmpArena
-scratch_begin(Arena *conflict)
+internal Arena *
+tl_scratch_arena_get(Arena **conflicts, usize conflict_count)
 {
   if (!tl_scratch_arenas[0])
   {
@@ -307,15 +307,28 @@ scratch_begin(Arena *conflict)
 
   for (usize i = 0; i < SCRATCH_ARENA_COUNT; i++)
   {
-    if (tl_scratch_arenas[i] != conflict)
+    Arena *candidate = tl_scratch_arenas[i];
+
+    bool is_conflict = false;
+    for (usize j = 0; j < conflict_count; j++)
     {
-      return arena_tmp_begin(tl_scratch_arenas[i]);
+      if (conflicts[j] == candidate)
+      {
+        is_conflict = true;
+        break;
+      }
     }
+
+    if (!is_conflict) return candidate;
   }
 
   assert(0 && "No non-conflicting scratch arena available.");
-  return (TmpArena){ 0 };
+  return 0;
 }
+
+#define scratch_begin(...)                                         \
+  arena_tmp_begin(tl_scratch_arena_get((Arena *[]){ __VA_ARGS__ }, \
+                                       sizeof((Arena *[]){ __VA_ARGS__ }) / sizeof(Arena *)))
 
 #define scratch_end(scratch) arena_tmp_end(scratch)
 
@@ -2153,8 +2166,11 @@ eval_call_expr(Arena *arena, AstExprCall call, Env *env)
     return object_from_error(arena, error);
   }
 
-  // TODO(tad): Need to check the env arena, too.
-  TmpArena scratch = scratch_begin(arena);
+  // NOTE(tad): These arenas are currently the same, and neither of them are
+  // scratch arenas. Still passing them both in the off chance a scratch arena
+  // is later passed in for one of them. If both are different scratch arenas
+  // will fail unless the number of scratch arenas is increased beyond 2.
+  TmpArena scratch = scratch_begin(arena, env->arena, call_fn->data.function.env->arena);
 
   struct CallArgBinding
   {
