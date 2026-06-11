@@ -461,6 +461,14 @@ str8_append(StrBuilder8 *builder, Str8 value)
   builder->len += value.len;
 }
 
+internal void
+str8_append_char(StrBuilder8 *builder, u8 value)
+{
+  str8_ensure_capacity(builder, builder->len + 1);
+  builder->buf[builder->len] = value;
+  builder->len += 1;
+}
+
 #define str8_append_lit(builder, value) str8_append((builder), str8_lit(value))
 
 internal void str8_append_fv(StrBuilder8 *builder, char const *fmt, va_list args) ATTRIB_FMT(2, 0);
@@ -539,6 +547,13 @@ is_letter(u8 ch)
   return ('a' <= ch && ch <= 'z') || ('A' <= ch && ch <= 'Z');
 }
 
+internal bool
+is_escapable_char(u8 ch)
+{
+  // TODO(tad): Is this function even useful right now?
+  return ch == '\\' || ch == '"' || ch == 't' || ch == 'n';
+}
+
 // TODO(tad): Use ASCII values for corresponding token kind values?
 #define TOKEN_KINDS(X)         \
   X(Illegal)                   \
@@ -547,6 +562,9 @@ is_letter(u8 ch)
   /* identifiers & literals */ \
   X(Identifier)                \
   X(Number)                    \
+  X(String)                    \
+  X(StringEsc)                 \
+  X(StringOpen)                \
                                \
   /* operators */              \
   X(Assign)                    \
@@ -717,6 +735,38 @@ lex_advance_token(Lexer *l, Token *token)
     case '}': lex_init_token(l, token, 1, TokenKind_RBrace); break;
     case ',': lex_init_token(l, token, 1, TokenKind_Comma); break;
 
+    case '"':
+    {
+      usize pos;
+      bool has_escaped_chars = false;
+      for (pos = l->pos + 1; pos < l->input.len && l->input.buf[pos] != '"'; pos++)
+      {
+        if (l->input.buf[pos] == '\\')
+        {
+          usize escaped_pos = pos + 1;
+          if (escaped_pos < l->input.len && is_escapable_char(l->input.buf[escaped_pos]))
+          {
+            pos               = escaped_pos;
+            has_escaped_chars = true;
+          }
+        }
+      }
+
+      TokenKind string_kind;
+      if (pos < l->input.len)
+      {
+        string_kind = has_escaped_chars ? TokenKind_StringEsc : TokenKind_String;
+        pos += 1;
+      }
+      else
+      {
+        string_kind = TokenKind_StringOpen;
+      }
+
+      lex_init_token(l, token, pos - l->pos, string_kind);
+      break;
+    }
+
     default:
     {
       if (is_digit(ch))
@@ -839,6 +889,7 @@ typedef enum
   X(Identifier)           \
   X(Number)               \
   X(Boolean)              \
+  X(String)               \
   X(Prefix)               \
   X(Infix)                \
   X(IfElse)               \
@@ -893,6 +944,13 @@ struct AstExprBoolean
 {
   Token token; // The boolean token
   b8 value;
+};
+
+typedef struct AstExprString AstExprString;
+struct AstExprString
+{
+  Token token; // The string token
+  Str8 value;
 };
 
 typedef struct AstExprPrefix AstExprPrefix;
@@ -959,6 +1017,7 @@ struct AstExpr
     AstExprIdentifier identifier;
     AstExprNumber number;
     AstExprBoolean boolean;
+    AstExprString string;
     AstExprPrefix prefix;
     AstExprInfix infix;
     AstExprIfElse if_else;
@@ -1045,6 +1104,12 @@ parse_build_expr_string(StrBuilder8 *b, AstExpr *expr)
     case AstExpr_Identifier: str8_append(b, expr->data.identifier.token.value); break;
     case AstExpr_Number: str8_append(b, expr->data.number.token.value); break;
     case AstExpr_Boolean: str8_append(b, expr->data.boolean.token.value); break;
+
+    case AstExpr_String:
+      str8_append_char(b, '"');
+      str8_append(b, expr->data.string.value);
+      str8_append_char(b, '"');
+      break;
 
     case AstExpr_Prefix:
       str8_append_lit(b, "(");
@@ -1285,6 +1350,70 @@ parse_expr_boolean(Parser *p)
   return expr;
 }
 
+internal const u8 EXPR_STRING_EMPTY_BUFFER[] = { 0 };
+
+internal AstExpr *
+parse_expr_string(Parser *p)
+{
+  AstExpr *expr           = arena_alloc_t(p->arena, AstExpr);
+  expr->tag               = AstExpr_String;
+  expr->data.string.token = p->curr_token;
+
+  usize len = expr->data.string.token.value.len - 1;
+
+  if (p->curr_token.kind == TokenKind_StringOpen)
+  {
+    Str8 error = str8_f(p->arena, "String literal '%.*s' is not closed.", str8_va(p->curr_token.value));
+    parse_error(p, MessageLevel_Error, error);
+  }
+  else if (len - 1 == 0)
+  {
+    expr->data.string.value.buf = EXPR_STRING_EMPTY_BUFFER;
+    expr->data.string.value.len = 0;
+  }
+  else if (p->curr_token.kind == TokenKind_StringEsc)
+  {
+    // TODO(tad): Consider only doing this work in the lex phase.
+    TmpArena scratch = scratch_begin(p->arena);
+    StrBuilder8 b    = str8_builder_create(scratch.arena, p->curr_token.value.len);
+
+    Str8 s = p->curr_token.value;
+    for (usize i = 1; i < len; i++)
+    {
+      if (s.buf[i] == '\\')
+      {
+        i += 1;
+        if (i < len)
+        {
+          switch (s.buf[i])
+          {
+            case '\\': str8_append_lit(&b, "\\"); break;
+            case 't': str8_append_lit(&b, "\t"); break;
+            case 'n': str8_append_lit(&b, "\n"); break;
+
+            case '"':
+            // NOTE(tad): Invalid escape sequences are ignored and replaced with the "escaped" char.
+            default: str8_append_char(&b, s.buf[i]); break;
+          }
+        }
+      }
+      else
+      {
+        str8_append_char(&b, s.buf[i]);
+      }
+    }
+
+    expr->data.string.value = str8_dump(&b, p->arena);
+  }
+  else
+  {
+    // TODO(tad): Consider interning strings.
+    expr->data.string.value = str8(p->curr_token.value.buf + 1, len - 1);
+  }
+
+  return expr;
+}
+
 internal AstExpr *
 parse_expr_unary_op(Parser *p)
 {
@@ -1409,6 +1538,9 @@ parse_expr_prefix(Parser *p)
 
     case TokenKind_True:
     case TokenKind_False: return parse_expr_boolean(p);
+
+    case TokenKind_String:
+    case TokenKind_StringEsc: return parse_expr_string(p);
 
     case TokenKind_Minus:
     case TokenKind_Bang: return parse_expr_unary_op(p);
@@ -1818,6 +1950,7 @@ env_set(Env *env, Str8 name, Object const *value)
 #define OBJECT_KINDS(X) \
   X(Number)             \
   X(Boolean)            \
+  X(String)             \
   X(Return)             \
   X(Function)           \
   X(Null)               \
@@ -1855,6 +1988,12 @@ struct ObjectBoolean
   b8 value;
 };
 
+typedef struct ObjectString ObjectString;
+struct ObjectString
+{
+  Str8 value;
+};
+
 typedef struct ObjectNull ObjectNull;
 struct ObjectNull
 {
@@ -1888,6 +2027,7 @@ struct Object
   {
     ObjectNumber number;
     ObjectBoolean boolean;
+    ObjectString string;
     ObjectReturn ret;
     ObjectFunction function;
     ObjectNull null;
@@ -1906,6 +2046,7 @@ eval_inspect(Arena *arena, Object const *o)
   {
     case ObjectKind_Number: return str8_f(arena, "%lld", o->data.number.value);
     case ObjectKind_Boolean: return o->data.boolean.value ? KEYWORD_TRUE : KEYWORD_FALSE;
+    case ObjectKind_String: return o->data.string.value;
     case ObjectKind_Return: return eval_inspect(arena, o->data.ret.value);
     case ObjectKind_Function:
     {
@@ -1954,6 +2095,15 @@ internal Object const *
 object_from_bool(bool value)
 {
   return value ? OBJECT_TRUE : OBJECT_FALSE;
+}
+
+internal Object const *
+object_from_string(Arena *arena, Str8 value)
+{
+  Object *result            = arena_alloc_t(arena, Object);
+  result->tag               = ObjectKind_String;
+  result->data.string.value = value;
+  return result;
 }
 
 internal bool
@@ -2237,6 +2387,7 @@ eval_expr(Arena *arena, AstExpr *expr, Env *env)
     }
     case AstExpr_Number: return object_from_number(arena, expr->data.number.value);
     case AstExpr_Boolean: return object_from_bool(expr->data.boolean.value);
+    case AstExpr_String: return object_from_string(arena, expr->data.string.value);
     case AstExpr_Function: return object_from_function(arena, expr->data.function, env);
 
     case AstExpr_Prefix: return eval_expr_prefix(arena, expr->data.prefix, env);
@@ -2564,51 +2715,97 @@ test_lex(void)
                         "\n"
                         "10 == 10\n"
                         "10 != 9\n"
+                        "\n"
                         "@\n"
-                        "");
+                        "\n"
+                        "\"word\"\n"
+                        "\"two words\"\n"
+                        "\"\\\"esc\\\"\"\n"
+                        "\"unclosed");
 
 #define test_result(kind, literal) { kind, str8_lit(literal) }
   Token test_results[] = {
-    test_result(TokenKind_Let, "let"),        test_result(TokenKind_Identifier, "five"),
-    test_result(TokenKind_Assign, "="),       test_result(TokenKind_Number, "5"),
-    test_result(TokenKind_Semicolon, ";"),    test_result(TokenKind_Let, "let"),
-    test_result(TokenKind_Identifier, "ten"), test_result(TokenKind_Assign, "="),
-    test_result(TokenKind_Number, "10"),      test_result(TokenKind_Semicolon, ";"),
+    test_result(TokenKind_Let, "let"),
+    test_result(TokenKind_Identifier, "five"),
+    test_result(TokenKind_Assign, "="),
+    test_result(TokenKind_Number, "5"),
+    test_result(TokenKind_Semicolon, ";"),
+    test_result(TokenKind_Let, "let"),
+    test_result(TokenKind_Identifier, "ten"),
+    test_result(TokenKind_Assign, "="),
+    test_result(TokenKind_Number, "10"),
+    test_result(TokenKind_Semicolon, ";"),
 
-    test_result(TokenKind_Let, "let"),        test_result(TokenKind_Identifier, "add"),
-    test_result(TokenKind_Assign, "="),       test_result(TokenKind_Function, "fn"),
-    test_result(TokenKind_LParen, "("),       test_result(TokenKind_Identifier, "x"),
-    test_result(TokenKind_Comma, ","),        test_result(TokenKind_Identifier, "y"),
-    test_result(TokenKind_RParen, ")"),       test_result(TokenKind_LBrace, "{"),
-    test_result(TokenKind_Identifier, "x"),   test_result(TokenKind_Plus, "+"),
-    test_result(TokenKind_Identifier, "y"),   test_result(TokenKind_Semicolon, ";"),
-    test_result(TokenKind_RBrace, "}"),       test_result(TokenKind_Semicolon, ";"),
+    test_result(TokenKind_Let, "let"),
+    test_result(TokenKind_Identifier, "add"),
+    test_result(TokenKind_Assign, "="),
+    test_result(TokenKind_Function, "fn"),
+    test_result(TokenKind_LParen, "("),
+    test_result(TokenKind_Identifier, "x"),
+    test_result(TokenKind_Comma, ","),
+    test_result(TokenKind_Identifier, "y"),
+    test_result(TokenKind_RParen, ")"),
+    test_result(TokenKind_LBrace, "{"),
+    test_result(TokenKind_Identifier, "x"),
+    test_result(TokenKind_Plus, "+"),
+    test_result(TokenKind_Identifier, "y"),
+    test_result(TokenKind_Semicolon, ";"),
+    test_result(TokenKind_RBrace, "}"),
+    test_result(TokenKind_Semicolon, ";"),
 
-    test_result(TokenKind_Let, "let"),        test_result(TokenKind_Identifier, "result"),
-    test_result(TokenKind_Assign, "="),       test_result(TokenKind_Identifier, "add"),
-    test_result(TokenKind_LParen, "("),       test_result(TokenKind_Identifier, "five"),
-    test_result(TokenKind_Comma, ","),        test_result(TokenKind_Identifier, "ten"),
-    test_result(TokenKind_RParen, ")"),       test_result(TokenKind_Semicolon, ";"),
+    test_result(TokenKind_Let, "let"),
+    test_result(TokenKind_Identifier, "result"),
+    test_result(TokenKind_Assign, "="),
+    test_result(TokenKind_Identifier, "add"),
+    test_result(TokenKind_LParen, "("),
+    test_result(TokenKind_Identifier, "five"),
+    test_result(TokenKind_Comma, ","),
+    test_result(TokenKind_Identifier, "ten"),
+    test_result(TokenKind_RParen, ")"),
+    test_result(TokenKind_Semicolon, ";"),
 
-    test_result(TokenKind_Bang, "!"),         test_result(TokenKind_Minus, "-"),
-    test_result(TokenKind_Slash, "/"),        test_result(TokenKind_Star, "*"),
-    test_result(TokenKind_Number, "5"),       test_result(TokenKind_Semicolon, ";"),
-    test_result(TokenKind_Number, "5"),       test_result(TokenKind_Less, "<"),
-    test_result(TokenKind_Number, "10"),      test_result(TokenKind_Greater, ">"),
-    test_result(TokenKind_Number, "5"),       test_result(TokenKind_If, "if"),
-    test_result(TokenKind_LParen, "("),       test_result(TokenKind_Number, "5"),
-    test_result(TokenKind_Less, "<"),         test_result(TokenKind_Number, "10"),
-    test_result(TokenKind_RParen, ")"),       test_result(TokenKind_LBrace, "{"),
-    test_result(TokenKind_Return, "return"),  test_result(TokenKind_True, "true"),
-    test_result(TokenKind_Semicolon, ";"),    test_result(TokenKind_RBrace, "}"),
-    test_result(TokenKind_Else, "else"),      test_result(TokenKind_LBrace, "{"),
-    test_result(TokenKind_Return, "return"),  test_result(TokenKind_False, "false"),
-    test_result(TokenKind_Semicolon, ";"),    test_result(TokenKind_RBrace, "}"),
+    test_result(TokenKind_Bang, "!"),
+    test_result(TokenKind_Minus, "-"),
+    test_result(TokenKind_Slash, "/"),
+    test_result(TokenKind_Star, "*"),
+    test_result(TokenKind_Number, "5"),
+    test_result(TokenKind_Semicolon, ";"),
+    test_result(TokenKind_Number, "5"),
+    test_result(TokenKind_Less, "<"),
+    test_result(TokenKind_Number, "10"),
+    test_result(TokenKind_Greater, ">"),
+    test_result(TokenKind_Number, "5"),
+    test_result(TokenKind_If, "if"),
+    test_result(TokenKind_LParen, "("),
+    test_result(TokenKind_Number, "5"),
+    test_result(TokenKind_Less, "<"),
+    test_result(TokenKind_Number, "10"),
+    test_result(TokenKind_RParen, ")"),
+    test_result(TokenKind_LBrace, "{"),
+    test_result(TokenKind_Return, "return"),
+    test_result(TokenKind_True, "true"),
+    test_result(TokenKind_Semicolon, ";"),
+    test_result(TokenKind_RBrace, "}"),
+    test_result(TokenKind_Else, "else"),
+    test_result(TokenKind_LBrace, "{"),
+    test_result(TokenKind_Return, "return"),
+    test_result(TokenKind_False, "false"),
+    test_result(TokenKind_Semicolon, ";"),
+    test_result(TokenKind_RBrace, "}"),
 
-    test_result(TokenKind_Number, "10"),      test_result(TokenKind_Equal, "=="),
-    test_result(TokenKind_Number, "10"),      test_result(TokenKind_Number, "10"),
-    test_result(TokenKind_NotEqual, "!="),    test_result(TokenKind_Number, "9"),
+    test_result(TokenKind_Number, "10"),
+    test_result(TokenKind_Equal, "=="),
+    test_result(TokenKind_Number, "10"),
+    test_result(TokenKind_Number, "10"),
+    test_result(TokenKind_NotEqual, "!="),
+    test_result(TokenKind_Number, "9"),
+
     test_result(TokenKind_Illegal, "@"),
+
+    test_result(TokenKind_String, "\"word\""),
+    test_result(TokenKind_String, "\"two words\""),
+    test_result(TokenKind_StringEsc, "\"\\\"esc\\\"\""),
+    test_result(TokenKind_StringOpen, "\"unclosed"),
   };
 #undef test_result
 
@@ -3374,6 +3571,46 @@ test_parse_expr_call_args(void)
 }
 
 internal int
+test_parse_expr_string(void)
+{
+  struct
+  {
+    Str8 input;
+    Str8 expected;
+  } tests[] = {
+    { str8_lit("\"Hello, World!\""), str8_lit("Hello, World!") },
+    { str8_lit("\"\""), str8_lit("") },
+    { str8_lit("\" \\\\ \\\" \\t \\n \""), str8_lit(" \\ \" \t \n ") },
+  };
+
+  for (usize i = 0; i < arr_count(tests); i++)
+  {
+    TmpArena scratch = scratch_begin(0);
+
+    Parser p = parse(scratch.arena, tests[i].input);
+    test_helper(test_parse_check_messages(&p));
+
+    AstStmt *stmt = p.statements;
+    test_assert_m(stmt != 0, "expected string expression statement is null");
+    test_assert_m(stmt->next == 0, "expected one statement, parsed more");
+    test_assert_m(stmt->tag == AstStmt_Expr, "expected expression statement");
+
+    AstExpr *expr = stmt->data.expr.expr;
+    test_assert_m(expr != 0, "expected string expression is null");
+    test_assert_m(expr->tag == AstExpr_String, "expected string expression");
+
+    test_assert_m(str8_equal(expr->data.string.value, tests[i].expected),
+                  "expected string '%.*s', parsed '%.*s'",
+                  str8_va(tests[i].expected),
+                  str8_va(expr->data.string.value));
+
+    scratch_end(scratch);
+  }
+
+  return 0;
+}
+
+internal int
 test_parse_op_precedence(void)
 {
   struct
@@ -3897,6 +4134,40 @@ test_eval_function_expr(void)
 }
 
 internal int
+test_eval_string_expr(void)
+{
+  struct
+  {
+    Str8 input;
+    Str8 expected;
+  } tests[] = {
+    { str8_lit("\"Hello, World!\""), str8_lit("Hello, World!") },
+  };
+
+  for (usize i = 0; i < arr_count(tests); i++)
+  {
+    TmpArena scratch = scratch_begin(0);
+
+    Parser p = parse(scratch.arena, tests[i].input);
+    test_helper(test_parse_check_messages(&p));
+
+    Env env = { 0 };
+    env_init(&env, scratch.arena, 0);
+
+    Object const *result = eval_program(scratch.arena, p.statements, &env);
+    test_assert_m(result->tag == ObjectKind_String, "expected string object");
+    test_assert_m(str8_equal(result->data.string.value, tests[i].expected),
+                  "expected string value '%.*s', evaluated '%.*s'",
+                  str8_va(tests[i].expected),
+                  str8_va(result->data.string.value));
+
+    scratch_end(scratch);
+  }
+
+  return 0;
+}
+
+internal int
 test_eval_return_stmt(void)
 {
   struct
@@ -4057,6 +4328,7 @@ test(void)
   result += test_parse_expr_function_params();
   result += test_parse_expr_call();
   result += test_parse_expr_call_args();
+  result += test_parse_expr_string();
 
   result += test_parse_op_precedence();
 
@@ -4071,6 +4343,7 @@ test(void)
   result += test_eval_bang();
   result += test_eval_if_else_expr();
   result += test_eval_function_expr();
+  result += test_eval_string_expr();
 
   result += test_eval_return_stmt();
   result += test_eval_let_stmt();
