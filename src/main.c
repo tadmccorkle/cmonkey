@@ -407,6 +407,19 @@ str8_copy(Arena *arena, Str8 s)
   return str8(buf, s.len);
 }
 
+internal Str8
+str8_concat(Arena *arena, Str8 s1, Str8 s2)
+{
+  usize len = s1.len + s2.len;
+  u8 *buf   = arena_alloc_tn_nz(arena, u8, len + 1);
+  buf[len]  = 0;
+
+  memcpy(buf, s1.buf, s1.len);
+  memcpy(buf + s1.len, s2.buf, s2.len);
+
+  return str8(buf, len);
+}
+
 internal bool
 str8_equal(Str8 a, Str8 b)
 {
@@ -1404,6 +1417,8 @@ parse_expr_string(Parser *p)
     }
 
     expr->data.string.value = str8_dump(&b, p->arena);
+
+    scratch_end(scratch);
   }
   else
   {
@@ -2193,12 +2208,24 @@ eval_expr_prefix(Arena *arena, AstExprPrefix prefix, Env *env)
 }
 
 internal Object const *
+object_from_unknown_infix_op(Arena *arena, AstExprInfix infix, Object const *lhs, Object const *rhs)
+{
+  Str8 error = str8_f(arena,
+                      "unknown operator: %.*s %.*s %.*s",
+                      str8_va(object_name(lhs->tag)),
+                      str8_va(infix.token.value),
+                      str8_va(object_name(rhs->tag)));
+  return object_from_error(arena, error);
+}
+
+internal Object const *
 eval_expr_infix(Arena *arena, AstExprInfix infix, Env *env)
 {
   Object const *result;
 
   Object const *lhs = eval_expr(arena, infix.lhs, env);
   Object const *rhs = eval_expr(arena, infix.rhs, env);
+  TokenKind op      = infix.token.kind;
 
   if (object_is_error(lhs))
   {
@@ -2210,7 +2237,7 @@ eval_expr_infix(Arena *arena, AstExprInfix infix, Env *env)
   }
   else if (lhs->tag == ObjectKind_Number && rhs->tag == ObjectKind_Number)
   {
-    switch (infix.token.kind)
+    switch (op)
     {
       case TokenKind_Plus:
         result = object_from_number(arena, lhs->data.number.value + rhs->data.number.value);
@@ -2236,21 +2263,31 @@ eval_expr_infix(Arena *arena, AstExprInfix infix, Env *env)
       case TokenKind_NotEqual:
         result = object_from_bool(lhs->data.number.value != rhs->data.number.value);
         break;
-      default:
+      default: result = object_from_unknown_infix_op(arena, infix, lhs, rhs); break;
+    }
+  }
+  else if (lhs->tag == ObjectKind_String && rhs->tag == ObjectKind_String)
+  {
+    switch (op)
+    {
+      case TokenKind_Plus:
       {
-        Str8 error = str8_f(arena,
-                            "unknown operator: %.*s %.*s %.*s",
-                            str8_va(object_name(lhs->tag)),
-                            str8_va(infix.token.value),
-                            str8_va(object_name(rhs->tag)));
-        result     = object_from_error(arena, error);
+        Str8 value = str8_concat(arena, lhs->data.string.value, rhs->data.string.value);
+        result     = object_from_string(arena, value);
         break;
       }
+      case TokenKind_Equal:
+        result = object_from_bool(str8_equal(lhs->data.string.value, rhs->data.string.value));
+        break;
+      case TokenKind_NotEqual:
+        result = object_from_bool(!str8_equal(lhs->data.string.value, rhs->data.string.value));
+        break;
+      default: result = object_from_unknown_infix_op(arena, infix, lhs, rhs); break;
     }
   }
   else
   {
-    switch (infix.token.kind)
+    switch (op)
     {
       // NOTE(tad): Non-number equality is determined by reference comparisons.
       // Boolean and null objects should always reference singletons.
@@ -2258,24 +2295,19 @@ eval_expr_infix(Arena *arena, AstExprInfix infix, Env *env)
       case TokenKind_NotEqual: result = object_from_bool(lhs != rhs); break;
       default:
       {
-        Str8 error;
         if (lhs->tag == rhs->tag)
         {
-          error = str8_f(arena,
-                         "unknown operator: %.*s %.*s %.*s",
-                         str8_va(object_name(lhs->tag)),
-                         str8_va(infix.token.value),
-                         str8_va(object_name(rhs->tag)));
+          result = object_from_unknown_infix_op(arena, infix, lhs, rhs);
         }
         else
         {
-          error = str8_f(arena,
-                         "type mismatch: %.*s %.*s %.*s",
-                         str8_va(object_name(lhs->tag)),
-                         str8_va(infix.token.value),
-                         str8_va(object_name(rhs->tag)));
+          Str8 error = str8_f(arena,
+                              "type mismatch: %.*s %.*s %.*s",
+                              str8_va(object_name(lhs->tag)),
+                              str8_va(infix.token.value),
+                              str8_va(object_name(rhs->tag)));
+          result     = object_from_error(arena, error);
         }
-        result = object_from_error(arena, error);
         break;
       }
     }
@@ -3974,6 +4006,11 @@ test_eval_boolean_expr(void)
     { str8_lit("(1 < 2) == false"), false },
     { str8_lit("(1 > 2) == true"), false },
     { str8_lit("(1 > 2) == false"), true },
+    { str8_lit("\"hello\" == \"hello\""), true },
+    { str8_lit("\"hello\" == \"ello\""), false },
+    { str8_lit("\"hello\" != \"hello\""), false },
+    { str8_lit("\"hello\" != \"ello\""), true },
+    { str8_lit("\" \\? \t\n \" == \" \\? \t\n \""), true },
   };
 
   for (usize i = 0; i < arr_count(tests); i++)
@@ -4142,6 +4179,7 @@ test_eval_string_expr(void)
     Str8 expected;
   } tests[] = {
     { str8_lit("\"Hello, World!\""), str8_lit("Hello, World!") },
+    { str8_lit("\"Hello\" + \", \" + \"World!\""), str8_lit("Hello, World!") },
   };
 
   for (usize i = 0; i < arr_count(tests); i++)
@@ -4281,6 +4319,10 @@ test_eval_error_handling(void)
     {
       str8_lit("let f = fn() { x; }; f();"),
       str8_lit("identifier not found: x"),
+    },
+    {
+      str8_lit("\"Hello\" - \"World\""),
+      str8_lit("unknown operator: String - String"),
     },
   };
 
