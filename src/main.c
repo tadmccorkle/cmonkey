@@ -2583,15 +2583,41 @@ eval_builtin_len(Arena *arena, Object const **args, u8 arg_count)
   return object_from_number(arena, (s64)arg->data.string.value.len);
 }
 
+internal Object const *
+eval_builtin_puts(Arena *arena, Object const **args, u8 arg_count)
+{
+  if (arg_count > 0)
+  {
+    u8 i = 0;
+    for (;;)
+    {
+      TmpArena scratch = scratch_begin(arena);
+      printf("%.*s", str8_va(eval_inspect(scratch.arena, args[i])));
+      scratch_end(scratch);
+
+      if (++i == arg_count) break;
+      printf(" ");
+    }
+  }
+  printf("\n");
+
+  return OBJECT_NULL;
+}
+
 internal Object const *builtin_len = &(Object){ .tag               = ObjectKind_Builtin,
                                                 .data.builtin.name = str8_lit("len"),
                                                 .data.builtin.fn   = eval_builtin_len };
+
+internal Object const *builtin_puts = &(Object){ .tag               = ObjectKind_Builtin,
+                                                 .data.builtin.name = str8_lit("puts"),
+                                                 .data.builtin.fn   = eval_builtin_puts };
 
 internal void
 env_builtin_init(Arena *arena)
 {
   env_init(env_builtin, arena, 0);
   env_set(env_builtin, builtin_len->data.builtin.name, builtin_len);
+  env_set(env_builtin, builtin_puts->data.builtin.name, builtin_puts);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
