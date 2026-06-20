@@ -1962,12 +1962,15 @@ env_set(Env *env, Str8 name, Object const *value)
   var->value = value;
 }
 
+internal Env *env_builtin = &(Env){ 0 };
+
 #define OBJECT_KINDS(X) \
   X(Number)             \
   X(Boolean)            \
   X(String)             \
   X(Return)             \
   X(Function)           \
+  X(Builtin)            \
   X(Null)               \
   X(Error)
 
@@ -2029,6 +2032,13 @@ struct ObjectFunction
   Env *env;
 };
 
+typedef struct ObjectBuiltin ObjectBuiltin;
+struct ObjectBuiltin
+{
+  Str8 name;
+  Object const *(*fn)(Arena *, Object const **, u8); // fn(arena, args, arg_count)
+};
+
 typedef struct ObjectError ObjectError;
 struct ObjectError
 {
@@ -2045,6 +2055,7 @@ struct Object
     ObjectString string;
     ObjectReturn ret;
     ObjectFunction function;
+    ObjectBuiltin builtin;
     ObjectNull null;
     ObjectError err;
   } data;
@@ -2081,6 +2092,13 @@ eval_inspect(Arena *arena, Object const *o)
       parse_build_stmt_string(&b, o->data.function.body->statements);
       str8_append_lit(&b, " }");
 
+      return str8_build(&b);
+    }
+    case ObjectKind_Builtin:
+    {
+      StrBuilder8 b = str8_builder_create_default(arena);
+      str8_append_lit(&b, "builtin:");
+      str8_append(&b, o->data.builtin.name);
       return str8_build(&b);
     }
     case ObjectKind_Null: return str8_lit("");
@@ -2338,22 +2356,13 @@ eval_expr_if_else(Arena *arena, AstExprIfElse if_else, Env *env)
 }
 
 internal Object const *
-eval_call_expr(Arena *arena, AstExprCall call, Env *env)
+eval_call_function(Arena *arena, AstExprCall call, ObjectFunction call_fn, Env *env)
 {
-  Object const *call_fn = eval_expr(arena, call.function, env);
-  if (object_is_error(call_fn)) return call_fn;
-
-  if (call_fn->tag != ObjectKind_Function)
-  {
-    Str8 error = str8_f(arena, "not a function: %.*s", str8_va(object_name(call_fn->tag)));
-    return object_from_error(arena, error);
-  }
-
   // NOTE(tad): These arenas are currently the same, and neither of them are
   // scratch arenas. Still passing them both in the off chance a scratch arena
   // is later passed in for one of them. If both are different scratch arenas
   // will fail unless the number of scratch arenas is increased beyond 2.
-  TmpArena scratch = scratch_begin(arena, env->arena, call_fn->data.function.env->arena);
+  TmpArena scratch = scratch_begin(arena, env->arena, call_fn.env->arena);
 
   struct CallArgBinding
   {
@@ -2365,7 +2374,7 @@ eval_call_expr(Arena *arena, AstExprCall call, Env *env)
 
   u8 arg_index                     = 0;
   AstExprCallArg *arg_expr         = call.args;
-  AstExprFunctionParam *param_expr = call_fn->data.function.params;
+  AstExprFunctionParam *param_expr = call_fn.params;
   while (arg_expr != 0 && param_expr != 0 && arg_index < call.arg_count)
   {
     Object const *arg_value = eval_expr(arena, arg_expr->expr, env);
@@ -2388,7 +2397,7 @@ eval_call_expr(Arena *arena, AstExprCall call, Env *env)
 
   Env *extended_env = arena_alloc_t(arena, Env);
   env_init_count(extended_env, arena, call.arg_count);
-  extended_env->outer = call_fn->data.function.env;
+  extended_env->outer = call_fn.env;
 
   for (u8 i = 0; i < arg_index; i++)
   {
@@ -2397,8 +2406,57 @@ eval_call_expr(Arena *arena, AstExprCall call, Env *env)
 
   scratch_end(scratch);
 
-  Object const *result = eval_block(arena, call_fn->data.function.body, extended_env);
+  Object const *result = eval_block(arena, call_fn.body, extended_env);
   return result->tag == ObjectKind_Return ? result->data.ret.value : result;
+}
+
+internal Object const *
+eval_call_builtin(Arena *arena, AstExprCall call, ObjectBuiltin call_builtin, Env *env)
+{
+  // NOTE(tad): These arenas are currently the same, and neither of them are
+  // scratch arenas. Still passing them both in the off chance a scratch arena
+  // is later passed in for one of them. If both are different scratch arenas
+  // will fail unless the number of scratch arenas is increased beyond 2.
+  TmpArena scratch = scratch_begin(arena, env->arena);
+
+  Object const **args = arena_alloc_tn(scratch.arena, Object const *, call.arg_count);
+
+  AstExprCallArg *arg = call.args;
+  for (u8 i = 0; arg != 0 && i < call.arg_count; i++)
+  {
+    Object const *arg_value = eval_expr(arena, arg->expr, env);
+    if (object_is_error(arg_value)) return arg_value;
+
+    args[i] = arg_value;
+    arg     = arg->next;
+  }
+
+  Object const *result = call_builtin.fn(arena, args, call.arg_count);
+
+  scratch_end(scratch);
+
+  return result;
+}
+
+internal Object const *
+eval_call_expr(Arena *arena, AstExprCall call, Env *env)
+{
+  Object const *call_target = eval_expr(arena, call.function, env);
+  if (object_is_error(call_target)) return call_target;
+
+  if (call_target->tag == ObjectKind_Function)
+  {
+    return eval_call_function(arena, call, call_target->data.function, env);
+  }
+  else if (call_target->tag == ObjectKind_Builtin)
+  {
+    return eval_call_builtin(arena, call, call_target->data.builtin, env);
+  }
+  else
+  {
+    Str8 error = str8_f(arena, "not a function: %.*s", str8_va(object_name(call_target->tag)));
+    return object_from_error(arena, error);
+  }
 }
 
 internal Object const *
@@ -2412,8 +2470,12 @@ eval_expr(Arena *arena, AstExpr *expr, Env *env)
       Object const *value = env_get(env, name);
       if (value == 0)
       {
-        Str8 error = str8_f(arena, "identifier not found: %.*s", str8_va(name));
-        value      = object_from_error(arena, error);
+        value = env_get(env_builtin, name);
+        if (value == 0)
+        {
+          Str8 error = str8_f(arena, "identifier not found: %.*s", str8_va(name));
+          value      = object_from_error(arena, error);
+        }
       }
       return value;
     }
@@ -2499,6 +2561,37 @@ eval_program(Arena *arena, AstStmt *statements, Env *env)
   }
 
   return result;
+}
+
+internal Object const *
+eval_builtin_len(Arena *arena, Object const **args, u8 arg_count)
+{
+  if (arg_count != 1)
+  {
+    Str8 error = str8_f(arena, "builtin 'len' requires 1 argument, received: %u", arg_count);
+    return object_from_error(arena, error);
+  }
+
+  Object const *arg = *args;
+  if (arg->tag != ObjectKind_String)
+  {
+    Str8 error =
+    str8_f(arena, "argument to builtin 'len' not supported: %.*s", str8_va(object_name(arg->tag)));
+    return object_from_error(arena, error);
+  }
+
+  return object_from_number(arena, (s64)arg->data.string.value.len);
+}
+
+internal Object const *builtin_len = &(Object){ .tag               = ObjectKind_Builtin,
+                                                .data.builtin.name = str8_lit("len"),
+                                                .data.builtin.fn   = eval_builtin_len };
+
+internal void
+env_builtin_init(Arena *arena)
+{
+  env_init(env_builtin, arena, 0);
+  env_set(env_builtin, builtin_len->data.builtin.name, builtin_len);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -2643,6 +2736,8 @@ repl(void)
   bool print_prompt = true;
 
   Arena *arena = arena_create(MiB(8));
+
+  env_builtin_init(arena);
 
   Env env = { 0 };
   env_init(&env, arena, 1024);
@@ -4206,6 +4301,75 @@ test_eval_string_expr(void)
 }
 
 internal int
+test_eval_builtin_len(void)
+{
+  struct
+  {
+    Str8 input;
+    s64 expected;
+    Str8 err;
+  } tests[] = {
+    {
+      str8_lit("len(\"\")"),
+      .expected = 0,
+    },
+    {
+      str8_lit("len(\"four\")"),
+      .expected = 4,
+    },
+    {
+      str8_lit("len(\"hello world\")"),
+      .expected = 11,
+    },
+    {
+      str8_lit("len(1)"),
+      .err = str8_lit("argument to builtin 'len' not supported: Number"),
+    },
+    {
+      str8_lit("len()"),
+      .err = str8_lit("builtin 'len' requires 1 argument, received: 0"),
+    },
+    {
+      str8_lit("len(\"one\", \"two\")"),
+      .err = str8_lit("builtin 'len' requires 1 argument, received: 2"),
+    },
+  };
+
+  for (usize i = 0; i < arr_count(tests); i++)
+  {
+    TmpArena scratch = scratch_begin(0);
+
+    Parser p = parse(scratch.arena, tests[i].input);
+    test_helper(test_parse_check_messages(&p));
+
+    Env env = { 0 };
+    env_init(&env, scratch.arena, 0);
+
+    Object const *result = eval_program(scratch.arena, p.statements, &env);
+    if (tests[i].err.buf == 0)
+    {
+      test_assert_m(result->tag == ObjectKind_Number, "expected number object");
+      test_assert_m(result->data.number.value == tests[i].expected,
+                    "expected number value '%lld', evaluated '%lld'",
+                    tests[i].expected,
+                    result->data.number.value);
+    }
+    else
+    {
+      test_assert_m(result->tag == ObjectKind_Error, "expected error object");
+      test_assert_m(str8_equal(tests[i].err, result->data.err.value),
+                    "expected error '%.*s', evaluated '%.*s'",
+                    str8_va(tests[i].err),
+                    str8_va(result->data.err.value));
+    }
+
+    scratch_end(scratch);
+  }
+
+  return 0;
+}
+
+internal int
 test_eval_return_stmt(void)
 {
   struct
@@ -4352,6 +4516,8 @@ test_eval_error_handling(void)
 internal int
 test(void)
 {
+  env_builtin_init(tl_scratch_arena_get(0, 0));
+
   int result = 0;
 
   result += test_lex();
@@ -4386,6 +4552,8 @@ test(void)
   result += test_eval_if_else_expr();
   result += test_eval_function_expr();
   result += test_eval_string_expr();
+
+  result += test_eval_builtin_len();
 
   result += test_eval_return_stmt();
   result += test_eval_let_stmt();
