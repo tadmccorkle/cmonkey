@@ -408,6 +408,51 @@ str8_copy(Arena *arena, Str8 s)
 }
 
 internal Str8
+str8_slice(Str8 s, usize start, usize end)
+{
+  start = min(start, s.len);
+  end   = min(end, s.len);
+  end   = max(start, end);
+
+  s.buf += start;
+  s.len = end - start;
+
+  return s;
+}
+
+internal Str8
+str8_prefix(Str8 s, usize len)
+{
+  s.len = min(len, s.len);
+  return s;
+}
+
+internal Str8
+str8_suffix(Str8 s, usize len)
+{
+  len = min(len, s.len);
+  s.buf += s.len - len;
+  s.len = len;
+  return s;
+}
+
+internal Str8
+str8_skip(Str8 s, usize count)
+{
+  count = min(count, s.len);
+  s.buf += count;
+  s.len -= count;
+  return s;
+}
+
+internal Str8
+str8_chop(Str8 s, usize count)
+{
+  s.len -= min(count, s.len);
+  return s;
+}
+
+internal Str8
 str8_concat(Arena *arena, Str8 s1, Str8 s2)
 {
   usize len = s1.len + s2.len;
@@ -423,7 +468,7 @@ str8_concat(Arena *arena, Str8 s1, Str8 s2)
 internal bool
 str8_equal(Str8 a, Str8 b)
 {
-  return a.len == b.len && memcmp(a.buf, b.buf, a.len) == 0;
+  return a.len == b.len && (a.len == 0 || memcmp(a.buf, b.buf, a.len) == 0);
 }
 
 #define STR8_BUILDER_DEFAULT_CAPACITY 256
@@ -2072,7 +2117,7 @@ eval_inspect(Arena *arena, Object const *o)
   {
     case ObjectKind_Number: return str8_f(arena, "%lld", o->data.number.value);
     case ObjectKind_Boolean: return o->data.boolean.value ? KEYWORD_TRUE : KEYWORD_FALSE;
-    case ObjectKind_String: return o->data.string.value;
+    case ObjectKind_String: return str8_f(arena, "\"%.*s\"", str8_va(o->data.string.value));
     case ObjectKind_Return: return eval_inspect(arena, o->data.ret.value);
     case ObjectKind_Function:
     {
@@ -2592,7 +2637,16 @@ eval_builtin_puts(Arena *arena, Object const **args, u8 arg_count)
     for (;;)
     {
       TmpArena scratch = scratch_begin(arena);
-      printf("%.*s", str8_va(eval_inspect(scratch.arena, args[i])));
+      Str8 output      = eval_inspect(scratch.arena, args[i]);
+      if (args[i]->tag == ObjectKind_String)
+      {
+        output = str8_slice(output, 1, output.len - 1);
+      }
+      else if (args[i]->tag == ObjectKind_Null)
+      {
+        output = str8_lit("null");
+      }
+      printf("%.*s", str8_va(output));
       scratch_end(scratch);
 
       if (++i == arg_count) break;
