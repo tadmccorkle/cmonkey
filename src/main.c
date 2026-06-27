@@ -32,6 +32,21 @@
 
 #define align_up(p, a) (((usize)(p) + ((usize)(a) - 1)) & (~((usize)(a) - 1)))
 
+#if defined(__GNUC__) || defined(__clang__)
+#  if UINTPTR_MAX == 0xFFFFFFFF
+#    define next_pow2(x) x <= 0 ? 2 : ((usize)1 << (32 - __builtin_clz((usize)(x) - 1)))
+#  else
+#    define next_pow2(x) x <= 0 ? 2 : ((usize)1 << (64 - __builtin_clzl((usize)(x) - 1)))
+#  endif
+#elif defined(_MSC_VER)
+#  include <intrin.h>
+#  if UINTPTR_MAX == 0xFFFFFFFF
+#    define next_pow2(x) x == 0 ? 1 : ((usize)1 << (32 - __lzcnt((usize)(x) - 1)))
+#  else
+#    define next_pow2(x) x == 0 ? 1 : ((usize)1 << (64 - __lzcnt64((usize)(x) - 1)))
+#  endif
+#endif
+
 #define arr_count(a) sizeof(a) / sizeof(*a)
 
 #define DEFER_LOOP(begin, end) for (int _i_ = ((begin), 0); !_i_; _i_ += 1, (end))
@@ -52,18 +67,6 @@ typedef s32 b32;
 typedef s64 b64;
 typedef float f32;
 typedef double f64;
-
-#if (defined(_MSC_VER) && _MSC_VER < 1800) || (!defined(_MSC_VER) && !defined(__STDC_VERSION__))
-#  ifndef true
-#    define true (0 == 0)
-#  endif
-#  ifndef false
-#    define false (0 != 0)
-#  endif
-typedef b8 bool;
-#else
-#  include <stdbool.h>
-#endif
 
 #if defined(__GNUC__) || defined(__clang__)
 #  define ATTRIB_FMT(fmt_idx, args_idx) __attribute__((format(printf, fmt_idx, args_idx)))
@@ -791,6 +794,8 @@ lex_advance_token(Lexer *l, Token *token)
     case ')': lex_init_token(l, token, 1, TokenKind_RParen); break;
     case '{': lex_init_token(l, token, 1, TokenKind_LBrace); break;
     case '}': lex_init_token(l, token, 1, TokenKind_RBrace); break;
+    case '[': lex_init_token(l, token, 1, TokenKind_LBracket); break;
+    case ']': lex_init_token(l, token, 1, TokenKind_RBracket); break;
     case ',': lex_init_token(l, token, 1, TokenKind_Comma); break;
 
     case '"':
@@ -941,6 +946,7 @@ typedef enum
   Precedence_Product,     // *
   Precedence_Prefix,      // - !
   Precedence_Call,        // func()
+  Precedence_Index,       // x[0]
 } Precedence;
 
 #define AST_EXPR_KINDS(X) \
@@ -948,11 +954,13 @@ typedef enum
   X(Number)               \
   X(Boolean)              \
   X(String)               \
+  X(Array)                \
   X(Prefix)               \
   X(Infix)                \
   X(IfElse)               \
   X(Function)             \
-  X(Call)
+  X(Call)                 \
+  X(Index)
 
 typedef enum
 {
@@ -1011,6 +1019,21 @@ struct AstExprString
   Str8 value;
 };
 
+typedef struct AstExprArrayElement AstExprArrayElement;
+struct AstExprArrayElement
+{
+  AstExprArrayElement *next;
+  AstExpr *value;
+};
+
+typedef struct AstExprArray AstExprArray;
+struct AstExprArray
+{
+  Token token; // The '[' token
+  AstExprArrayElement *elements;
+  usize count;
+};
+
 typedef struct AstExprPrefix AstExprPrefix;
 struct AstExprPrefix
 {
@@ -1067,6 +1090,14 @@ struct AstExprCall
   u8 arg_count;
 };
 
+typedef struct AstExprIndex AstExprIndex;
+struct AstExprIndex
+{
+  Token token; // The '[' token
+  AstExpr *lhs;
+  AstExpr *index;
+};
+
 struct AstExpr
 {
   AstExprKind tag;
@@ -1076,11 +1107,13 @@ struct AstExpr
     AstExprNumber number;
     AstExprBoolean boolean;
     AstExprString string;
+    AstExprArray array;
     AstExprPrefix prefix;
     AstExprInfix infix;
     AstExprIfElse if_else;
     AstExprFunction function;
     AstExprCall call;
+    AstExprIndex index;
   } data;
 };
 
@@ -1169,6 +1202,21 @@ parse_build_expr_string(StrBuilder8 *b, AstExpr *expr)
       str8_append_char(b, '"');
       break;
 
+    case AstExpr_Array:
+      str8_append_lit(b, "[");
+      if (expr->data.array.elements != 0)
+      {
+        AstExprArrayElement *element = expr->data.array.elements;
+        for (;;)
+        {
+          parse_build_expr_string(b, element->value);
+          if ((element = element->next) == 0) break;
+          str8_append_lit(b, ", ");
+        }
+      }
+      str8_append_lit(b, "]");
+      break;
+
     case AstExpr_Prefix:
       str8_append_lit(b, "(");
       str8_append(b, expr->data.prefix.token.value);
@@ -1187,14 +1235,14 @@ parse_build_expr_string(StrBuilder8 *b, AstExpr *expr)
       break;
 
     case AstExpr_IfElse:
-      str8_append_lit(b, "if(");
+      str8_append_lit(b, "if (");
       parse_build_expr_string(b, expr->data.if_else.condition);
       str8_append_lit(b, "){ ");
       parse_build_stmt_string(b, expr->data.if_else.consequence->statements);
       str8_append_lit(b, " }");
       if (expr->data.if_else.alternative != 0)
       {
-        str8_append_lit(b, "else{ ");
+        str8_append_lit(b, " else { ");
         parse_build_stmt_string(b, expr->data.if_else.alternative->statements);
         str8_append_lit(b, " }");
       }
@@ -1209,10 +1257,10 @@ parse_build_expr_string(StrBuilder8 *b, AstExpr *expr)
         {
           str8_append(b, param->identifier.token.value);
           if ((param = param->next) == 0) break;
-          str8_append_lit(b, ",");
+          str8_append_lit(b, ", ");
         }
       }
-      str8_append_lit(b, "){ ");
+      str8_append_lit(b, ") { ");
       parse_build_stmt_string(b, expr->data.function.body->statements);
       str8_append_lit(b, " }");
       break;
@@ -1227,10 +1275,18 @@ parse_build_expr_string(StrBuilder8 *b, AstExpr *expr)
         {
           parse_build_expr_string(b, arg->expr);
           if ((arg = arg->next) == 0) break;
-          str8_append_lit(b, ",");
+          str8_append_lit(b, ", ");
         }
       }
       str8_append_lit(b, ")");
+      break;
+
+    case AstExpr_Index:
+      str8_append_lit(b, "(");
+      parse_build_expr_string(b, expr->data.index.lhs);
+      str8_append_lit(b, "[");
+      parse_build_expr_string(b, expr->data.index.index);
+      str8_append_lit(b, "])");
       break;
 
     default: str8_append_lit(b, "[INVALID EXPRESSION TAG]"); break;
@@ -1345,6 +1401,8 @@ parse_get_precedence(TokenKind kind)
     case TokenKind_Star: return Precedence_Product;
 
     case TokenKind_LParen: return Precedence_Call;
+
+    case TokenKind_LBracket: return Precedence_Index;
 
     default: return Precedence_Lowest;
   }
@@ -1576,6 +1634,50 @@ parse_expr_function(Parser *p)
 }
 
 internal AstExpr *
+parse_expr_array(Parser *p)
+{
+  AstExpr *array          = arena_alloc_t(p->arena, AstExpr);
+  array->tag              = AstExpr_Array;
+  array->data.array.token = p->curr_token;
+
+  if (p->peek_token.kind != TokenKind_RBracket)
+  {
+    SLL_BUILDER(AstExprArrayElement) elements;
+    sll_builder_init(elements);
+
+    for (;;)
+    {
+      parse_advance_token(p);
+
+      AstExprArrayElement *element = arena_alloc_t(p->arena, AstExprArrayElement);
+      element->value               = parse_expr(p, Precedence_Lowest);
+
+      sll_builder_append(elements, element);
+
+      if (p->peek_token.kind == TokenKind_RBracket)
+      {
+        parse_advance_token(p);
+        break;
+      }
+
+      if (!parse_expect(p, TokenKind_Comma))
+      {
+        break;
+      }
+    }
+
+    array->data.array.elements = sll_builder_result(elements);
+    array->data.array.count    = elements.count;
+  }
+  else
+  {
+    parse_advance_token(p);
+  }
+
+  return array;
+}
+
+internal AstExpr *
 parse_expr_grouped(Parser *p)
 {
   parse_advance_token(p);
@@ -1594,6 +1696,7 @@ parse_expr_prefix(Parser *p)
     case TokenKind_Number: return parse_expr_number(p);
     case TokenKind_If: return parse_expr_if_else(p);
     case TokenKind_Function: return parse_expr_function(p);
+    case TokenKind_LBracket: return parse_expr_array(p);
     case TokenKind_LParen: return parse_expr_grouped(p);
 
     case TokenKind_True:
@@ -1692,6 +1795,24 @@ parse_expr_call(Parser *p, AstExpr *lhs)
 }
 
 internal AstExpr *
+parse_expr_index(Parser *p, AstExpr *lhs)
+{
+  parse_advance_token(p);
+
+  AstExpr *expr          = arena_alloc_t(p->arena, AstExpr);
+  expr->tag              = AstExpr_Index;
+  expr->data.index.token = p->curr_token;
+  expr->data.index.lhs   = lhs;
+
+  parse_advance_token(p);
+  expr->data.index.index = parse_expr(p, Precedence_Lowest);
+
+  parse_expect(p, TokenKind_RBracket);
+
+  return expr;
+}
+
+internal AstExpr *
 parse_expr_infix(Parser *p, AstExpr *lhs)
 {
   switch (p->peek_token.kind)
@@ -1704,8 +1825,8 @@ parse_expr_infix(Parser *p, AstExpr *lhs)
     case TokenKind_NotEqual:
     case TokenKind_Less:
     case TokenKind_Greater: return parse_expr_binary_op(p, lhs);
-
     case TokenKind_LParen: return parse_expr_call(p, lhs);
+    case TokenKind_LBracket: return parse_expr_index(p, lhs);
 
     default: return lhs;
   }
@@ -2013,6 +2134,7 @@ internal Env *env_builtin = &(Env){ 0 };
   X(Number)             \
   X(Boolean)            \
   X(String)             \
+  X(Array)              \
   X(Return)             \
   X(Function)           \
   X(Builtin)            \
@@ -2057,6 +2179,14 @@ struct ObjectString
   Str8 value;
 };
 
+typedef struct ObjectArray ObjectArray;
+struct ObjectArray
+{
+  Object const **elements;
+  usize len;
+  usize cap;
+};
+
 typedef struct ObjectNull ObjectNull;
 struct ObjectNull
 {
@@ -2098,6 +2228,7 @@ struct Object
     ObjectNumber number;
     ObjectBoolean boolean;
     ObjectString string;
+    ObjectArray array;
     ObjectReturn ret;
     ObjectFunction function;
     ObjectBuiltin builtin;
@@ -2119,6 +2250,24 @@ eval_inspect(Arena *arena, Object const *o)
     case ObjectKind_Boolean: return o->data.boolean.value ? KEYWORD_TRUE : KEYWORD_FALSE;
     case ObjectKind_String: return str8_f(arena, "\"%.*s\"", str8_va(o->data.string.value));
     case ObjectKind_Return: return eval_inspect(arena, o->data.ret.value);
+    case ObjectKind_Array:
+    {
+      StrBuilder8 b = str8_builder_create_default(arena);
+      str8_append_lit(&b, "[");
+      if (o->data.array.len != 0)
+      {
+        usize i;
+        for (i = 0; i < o->data.array.len - 1; i++)
+        {
+          str8_append(&b, eval_inspect(arena, o->data.array.elements[i]));
+          str8_append_lit(&b, ", ");
+        }
+        str8_append(&b, eval_inspect(arena, o->data.array.elements[i]));
+      }
+      str8_append_lit(&b, "]");
+
+      return str8_build(&b);
+    }
     case ObjectKind_Function:
     {
       StrBuilder8 b = str8_builder_create_default(arena);
@@ -2130,10 +2279,10 @@ eval_inspect(Arena *arena, Object const *o)
         {
           str8_append(&b, param->identifier.token.value);
           if ((param = param->next) == 0) break;
-          str8_append_lit(&b, ",");
+          str8_append_lit(&b, ", ");
         }
       }
-      str8_append_lit(&b, "){ ");
+      str8_append_lit(&b, ") { ");
       parse_build_stmt_string(&b, o->data.function.body->statements);
       str8_append_lit(&b, " }");
 
@@ -2159,6 +2308,8 @@ internal Object const *eval_expr(Arena *arena, AstExpr *expr, Env *env);
 internal Object const *eval_expr_prefix(Arena *arena, AstExprPrefix prefix, Env *env);
 internal Object const *eval_expr_infix(Arena *arena, AstExprInfix infix, Env *env);
 internal Object const *eval_expr_if_else(Arena *arena, AstExprIfElse if_else, Env *env);
+internal Object const *eval_expr_call(Arena *arena, AstExprCall call, Env *env);
+internal Object const *eval_expr_array(Arena *arena, AstExprArray array, Env *env);
 
 internal Object const *
 object_from_number(Arena *arena, s64 value)
@@ -2181,6 +2332,17 @@ object_from_string(Arena *arena, Str8 value)
   Object *result            = arena_alloc_t(arena, Object);
   result->tag               = ObjectKind_String;
   result->data.string.value = value;
+  return result;
+}
+
+internal Object const *
+object_from_array(Arena *arena, Object const **elements, usize len, usize cap)
+{
+  Object *result              = arena_alloc_t(arena, Object);
+  result->tag                 = ObjectKind_Array;
+  result->data.array.elements = elements;
+  result->data.array.len      = len;
+  result->data.array.cap      = cap;
   return result;
 }
 
@@ -2484,7 +2646,7 @@ eval_call_builtin(Arena *arena, AstExprCall call, ObjectBuiltin call_builtin, En
 }
 
 internal Object const *
-eval_call_expr(Arena *arena, AstExprCall call, Env *env)
+eval_expr_call(Arena *arena, AstExprCall call, Env *env)
 {
   Object const *call_target = eval_expr(arena, call.function, env);
   if (object_is_error(call_target)) return call_target;
@@ -2501,6 +2663,64 @@ eval_call_expr(Arena *arena, AstExprCall call, Env *env)
   {
     Str8 error = str8_f(arena, "not a function: %.*s", str8_va(object_name(call_target->tag)));
     return object_from_error(arena, error);
+  }
+}
+
+internal Object const *
+eval_expr_array(Arena *arena, AstExprArray array, Env *env)
+{
+  usize len = array.count;
+  usize cap = max(next_pow2(len), 4);
+
+  Object const **elements = arena_alloc_tn(arena, Object const *, cap);
+
+  AstExprArrayElement *element_expr = array.elements;
+  for (u8 i = 0; element_expr != 0 && i < array.count; i++)
+  {
+    Object const *element = eval_expr(arena, element_expr->value, env);
+    if (object_is_error(element)) return element;
+
+    elements[i]  = element;
+    element_expr = element_expr->next;
+  }
+
+  return object_from_array(arena, elements, len, cap);
+}
+
+internal Object const *
+eval_index_array(ObjectArray array, ObjectNumber index)
+{
+  return index.value >= 0 && (usize)index.value < array.len ? array.elements[index.value] : OBJECT_NULL;
+}
+
+internal Object const *
+eval_expr_index(Arena *arena, AstExprIndex index_expr, Env *env)
+{
+  Object const *target = eval_expr(arena, index_expr.lhs, env);
+  if (object_is_error(target)) return target;
+
+  Object const *index = eval_expr(arena, index_expr.index, env);
+  if (object_is_error(index)) return index;
+
+  switch (target->tag)
+  {
+    case ObjectKind_Array:
+    {
+      if (index->tag != ObjectKind_Number)
+      {
+        Str8 error = str8_f(arena, "invalid array index type: %.*s", str8_va(object_name(index->tag)));
+        return object_from_error(arena, error);
+      }
+
+      return eval_index_array(target->data.array, index->data.number);
+    }
+
+    default:
+    {
+      Str8 error =
+      str8_f(arena, "indexing not supported for type: %.*s", str8_va(object_name(target->tag)));
+      return object_from_error(arena, error);
+    }
   }
 }
 
@@ -2532,7 +2752,9 @@ eval_expr(Arena *arena, AstExpr *expr, Env *env)
     case AstExpr_Prefix: return eval_expr_prefix(arena, expr->data.prefix, env);
     case AstExpr_Infix: return eval_expr_infix(arena, expr->data.infix, env);
     case AstExpr_IfElse: return eval_expr_if_else(arena, expr->data.if_else, env);
-    case AstExpr_Call: return eval_call_expr(arena, expr->data.call, env);
+    case AstExpr_Call: return eval_expr_call(arena, expr->data.call, env);
+    case AstExpr_Array: return eval_expr_array(arena, expr->data.array, env);
+    case AstExpr_Index: return eval_expr_index(arena, expr->data.index, env);
 
     default: return OBJECT_NULL;
   }
@@ -2685,8 +2907,6 @@ internal int repl(void);
 int
 main(int argc, char *argv[])
 {
-  // TODO(tad): What to do with input?
-
   if (argc > 1)
   {
     if (strcmp(argv[1], "test") == 0)
@@ -2923,6 +3143,8 @@ test_lex(void)
                         "10 == 10\n"
                         "10 != 9\n"
                         "\n"
+                        "[1, 2]\n"
+                        "\n"
                         "@\n"
                         "\n"
                         "\"word\"\n"
@@ -3006,6 +3228,12 @@ test_lex(void)
     test_result(TokenKind_Number, "10"),
     test_result(TokenKind_NotEqual, "!="),
     test_result(TokenKind_Number, "9"),
+
+    test_result(TokenKind_LBracket, "["),
+    test_result(TokenKind_Number, "1"),
+    test_result(TokenKind_Comma, ","),
+    test_result(TokenKind_Number, "2"),
+    test_result(TokenKind_RBracket, "]"),
 
     test_result(TokenKind_Illegal, "@"),
 
@@ -3818,6 +4046,123 @@ test_parse_expr_string(void)
 }
 
 internal int
+test_parse_expr_array(void)
+{
+  // empty array: []
+  {
+    TmpArena scratch = scratch_begin(0);
+
+    Parser p = parse(scratch.arena, str8_lit("[]"));
+    test_helper(test_parse_check_messages(&p));
+
+    AstStmt *stmt = p.statements;
+    test_assert_m(stmt != 0, "expected array expression statement is null");
+    test_assert_m(stmt->next == 0, "expected one statement, parsed more");
+    test_assert_m(stmt->tag == AstStmt_Expr, "expected expression statement");
+
+    AstExpr *expr = stmt->data.expr.expr;
+    test_assert_m(expr != 0, "expected array expression is null");
+    test_assert_m(expr->tag == AstExpr_Array, "expected array expression");
+    test_assert_m(expr->data.array.elements == 0, "expected empty array, parsed elements");
+
+    scratch_end(scratch);
+  }
+
+  // single element: [1]
+  {
+    TmpArena scratch = scratch_begin(0);
+
+    Parser p = parse(scratch.arena, str8_lit("[1]"));
+    test_helper(test_parse_check_messages(&p));
+
+    AstStmt *stmt = p.statements;
+    test_assert_m(stmt != 0, "expected array expression statement is null");
+    test_assert_m(stmt->next == 0, "expected one statement, parsed more");
+    test_assert_m(stmt->tag == AstStmt_Expr, "expected expression statement");
+
+    AstExpr *expr = stmt->data.expr.expr;
+    test_assert_m(expr != 0, "expected array expression is null");
+    test_assert_m(expr->tag == AstExpr_Array, "expected array expression");
+
+    AstExprArrayElement *element = expr->data.array.elements;
+    test_assert_m(element != 0, "expected one array element, parsed zero");
+    test_helper(test_lit_expr(element->value, expected_lit(AstExpr_Number, s64, 1)));
+    test_assert_m(element->next == 0, "expected one array element, parsed more");
+
+    scratch_end(scratch);
+  }
+
+  // multiple elements: [1, 1 * 2, 3 + 3]
+  {
+    TmpArena scratch = scratch_begin(0);
+
+    Parser p = parse(scratch.arena, str8_lit("[1, 1 * 2, 3 + 3]"));
+    test_helper(test_parse_check_messages(&p));
+
+    AstStmt *stmt = p.statements;
+    test_assert_m(stmt != 0, "expected array expression statement is null");
+    test_assert_m(stmt->next == 0, "expected one statement, parsed more");
+    test_assert_m(stmt->tag == AstStmt_Expr, "expected expression statement");
+
+    AstExpr *expr = stmt->data.expr.expr;
+    test_assert_m(expr != 0, "expected array expression is null");
+    test_assert_m(expr->tag == AstExpr_Array, "expected array expression");
+
+    AstExprArrayElement *element = expr->data.array.elements;
+    test_assert_m(element != 0, "expected three array elements, parsed zero");
+    test_helper(test_lit_expr(element->value, expected_lit(AstExpr_Number, s64, 1)));
+
+    element = element->next;
+    test_assert_m(element != 0, "expected three array elements, parsed fewer");
+    test_helper(test_infix_lit_expr(element->value,
+                                    TokenKind_Star,
+                                    expected_lit(AstExpr_Number, s64, 1),
+                                    expected_lit(AstExpr_Number, s64, 2)));
+
+    element = element->next;
+    test_assert_m(element != 0, "expected three array elements, parsed fewer");
+    test_helper(test_infix_lit_expr(element->value,
+                                    TokenKind_Plus,
+                                    expected_lit(AstExpr_Number, s64, 3),
+                                    expected_lit(AstExpr_Number, s64, 3)));
+
+    test_assert_m(element->next == 0, "expected three array elements, parsed more");
+
+    scratch_end(scratch);
+  }
+
+  return 0;
+}
+
+internal int
+test_parse_expr_index(void)
+{
+  TmpArena scratch = scratch_begin(0);
+
+  Parser p = parse(scratch.arena, str8_lit("arr[1 + 1]"));
+  test_helper(test_parse_check_messages(&p));
+
+  AstStmt *stmt = p.statements;
+  test_assert_m(stmt != 0, "expected array expression statement is null");
+  test_assert_m(stmt->next == 0, "expected one statement, parsed more");
+  test_assert_m(stmt->tag == AstStmt_Expr, "expected expression statement");
+
+  AstExpr *expr = stmt->data.expr.expr;
+  test_assert_m(expr != 0, "expected index expression is null");
+  test_assert_m(expr->tag == AstExpr_Index, "expected index expression");
+
+  test_helper(test_identifier_expr(expr->data.index.lhs, str8_lit("arr")));
+  test_helper(test_infix_lit_expr(expr->data.index.index,
+                                  TokenKind_Plus,
+                                  expected_lit(AstExpr_Number, s64, 1),
+                                  expected_lit(AstExpr_Number, s64, 1)));
+
+  scratch_end(scratch);
+
+  return 0;
+}
+
+internal int
 test_parse_op_precedence(void)
 {
   struct
@@ -3916,11 +4261,19 @@ test_parse_op_precedence(void)
     },
     {
       str8_lit("add(a, b, 1, 2 * 3, 4 + 5, add(6, 7 * 8))"),
-      str8_lit("add(a,b,1,(2 * 3),(4 + 5),add(6,(7 * 8)))"),
+      str8_lit("add(a, b, 1, (2 * 3), (4 + 5), add(6, (7 * 8)))"),
     },
     {
       str8_lit("add(a + b + c * d / f + g)"),
       str8_lit("add((((a + b) + ((c * d) / f)) + g))"),
+    },
+    {
+      str8_lit("a * [1, 2, 3, 4][b * c] * d"),
+      str8_lit("((a * ([1, 2, 3, 4][(b * c)])) * d)"),
+    },
+    {
+      str8_lit("add(a * b[2], b[1], 2 * [1, 2][1])"),
+      str8_lit("add((a * (b[2])), (b[1]), (2 * ([1, 2][1])))"),
     },
   };
 
@@ -4381,6 +4734,139 @@ test_eval_string_expr(void)
 }
 
 internal int
+test_eval_array_expr(void)
+{
+  // empty array: []
+  {
+    TmpArena scratch = scratch_begin(0);
+
+    Parser p = parse(scratch.arena, str8_lit("[]"));
+    test_helper(test_parse_check_messages(&p));
+
+    Env env = { 0 };
+    env_init(&env, scratch.arena, 0);
+
+    Object const *result = eval_program(scratch.arena, p.statements, &env);
+    test_assert_m(result->tag == ObjectKind_Array, "expected array object");
+    test_assert_m(result->data.array.len == 0,
+                  "expected empty array, evaluated %zu elements",
+                  result->data.array.len);
+
+    scratch_end(scratch);
+  }
+
+  // one element: [1]
+  {
+    TmpArena scratch = scratch_begin(0);
+
+    Parser p = parse(scratch.arena, str8_lit("[1]"));
+    test_helper(test_parse_check_messages(&p));
+
+    Env env = { 0 };
+    env_init(&env, scratch.arena, 0);
+
+    Object const *result = eval_program(scratch.arena, p.statements, &env);
+    test_assert_m(result->tag == ObjectKind_Array, "expected array object");
+    test_assert_m(result->data.array.len == 1,
+                  "expected three array elements, evaluated %zu",
+                  result->data.array.len);
+
+    Object const *element = result->data.array.elements[0];
+    test_assert_m(element->tag == ObjectKind_Number, "expected number array element");
+    test_assert_m(element->data.number.value == 1,
+                  "expected array element '%d', evaluated '%lld'",
+                  1,
+                  element->data.number.value);
+  }
+
+  // multiple elements: [1, 2 * 2, 3 + 3, 7, 8, 9]
+  {
+    TmpArena scratch = scratch_begin(0);
+
+    Parser p = parse(scratch.arena, str8_lit("[1, 2 * 2, 3 + 3, 7, 8, 9]"));
+    test_helper(test_parse_check_messages(&p));
+
+    Env env = { 0 };
+    env_init(&env, scratch.arena, 0);
+
+    Object const *result = eval_program(scratch.arena, p.statements, &env);
+    test_assert_m(result->tag == ObjectKind_Array, "expected array object");
+    test_assert_m(result->data.array.len == 6,
+                  "expected three array elements, evaluated %zu",
+                  result->data.array.len);
+
+    s64 expected[] = { 1, 4, 6, 7, 8, 9 };
+    for (usize i = 0; i < arr_count(expected); i++)
+    {
+      Object const *element = result->data.array.elements[i];
+      test_assert_m(element->tag == ObjectKind_Number, "expected number array element");
+      test_assert_m(element->data.number.value == expected[i],
+                    "expected array element '%lld', evaluated '%lld'",
+                    expected[i],
+                    element->data.number.value);
+    }
+
+    scratch_end(scratch);
+  }
+
+  return 0;
+}
+
+internal int
+test_eval_index_expr(void)
+{
+  struct
+  {
+    Str8 input;
+    s64 expected;
+    b8 is_null;
+  } tests[] = {
+    { str8_lit("[1, 2, 3][0]"), 1, false },
+    { str8_lit("[1, 2, 3][1]"), 2, false },
+    { str8_lit("[1, 2, 3][2]"), 3, false },
+    { str8_lit("let i = 0; [1][i];"), 1, false },
+    { str8_lit("[1, 2, 3][1 + 1];"), 3, false },
+    { str8_lit("let myArray = [1, 2, 3]; myArray[2];"), 3, false },
+    { str8_lit("let myArray = [1, 2, 3]; myArray[0] + myArray[1] + myArray[2];"), 6, false },
+    { str8_lit("let myArray = [1, 2, 3]; let i = myArray[0]; myArray[i]"), 2, false },
+    { str8_lit("[1, 2, 3][3]"), 0, true },
+    { str8_lit("[1, 2, 3][-1]"), 0, true },
+  };
+
+  for (usize i = 0; i < arr_count(tests); i++)
+  {
+    TmpArena scratch = scratch_begin(0);
+
+    Parser p = parse(scratch.arena, tests[i].input);
+    test_helper(test_parse_check_messages(&p));
+
+    Env env = { 0 };
+    env_init(&env, scratch.arena, 0);
+
+    Object const *result = eval_program(scratch.arena, p.statements, &env);
+
+    if (tests[i].is_null)
+    {
+      test_assert_m(result->tag == ObjectKind_Null,
+                    "expected null object, evaluated '%.*s'",
+                    str8_va(object_name(result->tag)));
+    }
+    else
+    {
+      test_assert_m(result->tag == ObjectKind_Number, "expected number object");
+      test_assert_m(result->data.number.value == tests[i].expected,
+                    "expected number value '%lld', evaluated '%lld'",
+                    tests[i].expected,
+                    result->data.number.value);
+    }
+
+    scratch_end(scratch);
+  }
+
+  return 0;
+}
+
+internal int
 test_eval_builtin_len(void)
 {
   struct
@@ -4568,6 +5054,14 @@ test_eval_error_handling(void)
       str8_lit("\"Hello\" - \"World\""),
       str8_lit("unknown operator: String - String"),
     },
+    {
+      str8_lit("[1,2,3][\"i\"]"),
+      str8_lit("invalid array index type: String"),
+    },
+    {
+      str8_lit("5[0]"),
+      str8_lit("indexing not supported for type: Number"),
+    },
   };
 
   for (usize i = 0; i < arr_count(tests); i++)
@@ -4617,6 +5111,8 @@ test(void)
   result += test_parse_expr_call();
   result += test_parse_expr_call_args();
   result += test_parse_expr_string();
+  result += test_parse_expr_array();
+  result += test_parse_expr_index();
 
   result += test_parse_op_precedence();
 
@@ -4632,6 +5128,8 @@ test(void)
   result += test_eval_if_else_expr();
   result += test_eval_function_expr();
   result += test_eval_string_expr();
+  result += test_eval_array_expr();
+  result += test_eval_index_expr();
 
   result += test_eval_builtin_len();
 
