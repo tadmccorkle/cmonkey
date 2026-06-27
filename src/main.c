@@ -2694,6 +2694,14 @@ eval_index_array(ObjectArray array, ObjectNumber index)
 }
 
 internal Object const *
+eval_index_string(Arena *arena, ObjectString string, ObjectNumber index)
+{
+  return index.value >= 0 && (usize)index.value < string.value.len
+       ? object_from_string(arena, str8(string.value.buf + index.value, 1))
+       : OBJECT_NULL;
+}
+
+internal Object const *
 eval_expr_index(Arena *arena, AstExprIndex index_expr, Env *env)
 {
   Object const *target = eval_expr(arena, index_expr.lhs, env);
@@ -2713,6 +2721,17 @@ eval_expr_index(Arena *arena, AstExprIndex index_expr, Env *env)
       }
 
       return eval_index_array(target->data.array, index->data.number);
+    }
+
+    case ObjectKind_String:
+    {
+      if (index->tag != ObjectKind_Number)
+      {
+        Str8 error = str8_f(arena, "invalid string index type: %.*s", str8_va(object_name(index->tag)));
+        return object_from_error(arena, error);
+      }
+
+      return eval_index_string(arena, target->data.string, index->data.number);
     }
 
     default:
@@ -4813,7 +4832,7 @@ test_eval_array_expr(void)
 }
 
 internal int
-test_eval_index_expr(void)
+test_eval_array_index_expr(void)
 {
   struct
   {
@@ -4858,6 +4877,55 @@ test_eval_index_expr(void)
                     "expected number value '%lld', evaluated '%lld'",
                     tests[i].expected,
                     result->data.number.value);
+    }
+
+    scratch_end(scratch);
+  }
+
+  return 0;
+}
+
+internal int
+test_eval_string_index_expr(void)
+{
+  struct
+  {
+    Str8 input;
+    Str8 expected;
+    b8 is_null;
+  } tests[] = {
+    { str8_lit("\"test\"[0]"), str8_lit("t"), false },
+    { str8_lit("\"test\"[1]"), str8_lit("e"), false },
+    { str8_lit("\"test\"[2]"), str8_lit("s"), false },
+    { str8_lit("\"test\"[4]"), { 0 }, true },
+    { str8_lit("\"test\"[-1]"), { 0 }, true },
+  };
+
+  for (usize i = 0; i < arr_count(tests); i++)
+  {
+    TmpArena scratch = scratch_begin(0);
+
+    Parser p = parse(scratch.arena, tests[i].input);
+    test_helper(test_parse_check_messages(&p));
+
+    Env env = { 0 };
+    env_init(&env, scratch.arena, 0);
+
+    Object const *result = eval_program(scratch.arena, p.statements, &env);
+
+    if (tests[i].is_null)
+    {
+      test_assert_m(result->tag == ObjectKind_Null,
+                    "expected null object, evaluated '%.*s'",
+                    str8_va(object_name(result->tag)));
+    }
+    else
+    {
+      test_assert_m(result->tag == ObjectKind_String, "expected string object");
+      test_assert_m(str8_equal(result->data.string.value, tests[i].expected),
+                    "expected number value '%.*s', evaluated '%.*s'",
+                    str8_va(tests[i].expected),
+                    str8_va(result->data.string.value));
     }
 
     scratch_end(scratch);
@@ -5059,6 +5127,10 @@ test_eval_error_handling(void)
       str8_lit("invalid array index type: String"),
     },
     {
+      str8_lit("\"test\"[\"i\"]"),
+      str8_lit("invalid string index type: String"),
+    },
+    {
       str8_lit("5[0]"),
       str8_lit("indexing not supported for type: Number"),
     },
@@ -5129,7 +5201,8 @@ test(void)
   result += test_eval_function_expr();
   result += test_eval_string_expr();
   result += test_eval_array_expr();
-  result += test_eval_index_expr();
+  result += test_eval_array_index_expr();
+  result += test_eval_string_index_expr();
 
   result += test_eval_builtin_len();
 
