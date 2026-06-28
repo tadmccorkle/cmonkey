@@ -34,16 +34,16 @@
 
 #if defined(__GNUC__) || defined(__clang__)
 #  if UINTPTR_MAX == 0xFFFFFFFF
-#    define next_pow2(x) x <= 0 ? 2 : ((usize)1 << (32 - __builtin_clz((usize)(x) - 1)))
+#    define next_pow2(x) x <= 1 ? 2 : ((usize)1 << (32 - __builtin_clz((usize)(x) - 1)))
 #  else
-#    define next_pow2(x) x <= 0 ? 2 : ((usize)1 << (64 - __builtin_clzl((usize)(x) - 1)))
+#    define next_pow2(x) x <= 1 ? 2 : ((usize)1 << (64 - __builtin_clzl((usize)(x) - 1)))
 #  endif
 #elif defined(_MSC_VER)
 #  include <intrin.h>
 #  if UINTPTR_MAX == 0xFFFFFFFF
-#    define next_pow2(x) x == 0 ? 1 : ((usize)1 << (32 - __lzcnt((usize)(x) - 1)))
+#    define next_pow2(x) x <= 1 ? 2 : ((usize)1 << (32 - __lzcnt((usize)(x) - 1)))
 #  else
-#    define next_pow2(x) x == 0 ? 1 : ((usize)1 << (64 - __lzcnt64((usize)(x) - 1)))
+#    define next_pow2(x) x <= 1 ? 2 : ((usize)1 << (64 - __lzcnt64((usize)(x) - 1)))
 #  endif
 #endif
 
@@ -2184,7 +2184,6 @@ struct ObjectArray
 {
   Object const **elements;
   usize len;
-  usize cap;
 };
 
 typedef struct ObjectNull ObjectNull;
@@ -2254,10 +2253,10 @@ eval_inspect(Arena *arena, Object const *o)
     {
       StrBuilder8 b = str8_builder_create_default(arena);
       str8_append_lit(&b, "[");
-      if (o->data.array.len != 0)
+      if (o->data.array.len > 0)
       {
-        usize i;
-        for (i = 0; i < o->data.array.len - 1; i++)
+        usize i = 0;
+        for (; i < o->data.array.len - 1; i++)
         {
           str8_append(&b, eval_inspect(arena, o->data.array.elements[i]));
           str8_append_lit(&b, ", ");
@@ -2336,13 +2335,12 @@ object_from_string(Arena *arena, Str8 value)
 }
 
 internal Object const *
-object_from_array(Arena *arena, Object const **elements, usize len, usize cap)
+object_from_array(Arena *arena, Object const **elements, usize len)
 {
   Object *result              = arena_alloc_t(arena, Object);
   result->tag                 = ObjectKind_Array;
   result->data.array.elements = elements;
   result->data.array.len      = len;
-  result->data.array.cap      = cap;
   return result;
 }
 
@@ -2669,10 +2667,7 @@ eval_expr_call(Arena *arena, AstExprCall call, Env *env)
 internal Object const *
 eval_expr_array(Arena *arena, AstExprArray array, Env *env)
 {
-  usize len = array.count;
-  usize cap = max(next_pow2(len), 4);
-
-  Object const **elements = arena_alloc_tn(arena, Object const *, cap);
+  Object const **elements = array.count > 0 ? arena_alloc_tn(arena, Object const *, array.count) : 0;
 
   AstExprArrayElement *element_expr = array.elements;
   for (u8 i = 0; element_expr != 0 && i < array.count; i++)
@@ -2684,7 +2679,7 @@ eval_expr_array(Arena *arena, AstExprArray array, Env *env)
     element_expr = element_expr->next;
   }
 
-  return object_from_array(arena, elements, len, cap);
+  return object_from_array(arena, elements, array.count);
 }
 
 internal Object const *
@@ -2859,14 +2854,87 @@ eval_builtin_len(Arena *arena, Object const **args, u8 arg_count)
   }
 
   Object const *arg = *args;
-  if (arg->tag != ObjectKind_String)
+  switch (arg->tag)
   {
-    Str8 error =
-    str8_f(arena, "argument to builtin 'len' not supported: %.*s", str8_va(object_name(arg->tag)));
+    case ObjectKind_String: return object_from_number(arena, (s64)arg->data.string.value.len);
+    case ObjectKind_Array: return object_from_number(arena, (s64)arg->data.array.len);
+    default:
+    {
+      Str8 error =
+      str8_f(arena, "argument to builtin 'len' not supported: %.*s", str8_va(object_name(arg->tag)));
+      return object_from_error(arena, error);
+    }
+  }
+}
+
+internal Object const *
+eval_builtin_rest(Arena *arena, Object const **args, u8 arg_count)
+{
+  if (arg_count != 1)
+  {
+    Str8 error = str8_f(arena, "builtin 'rest' requires 1 argument, received: %u", arg_count);
     return object_from_error(arena, error);
   }
 
-  return object_from_number(arena, (s64)arg->data.string.value.len);
+  Object const *arg = *args;
+
+  if (arg->tag != ObjectKind_Array)
+  {
+    Str8 error =
+    str8_f(arena, "argument to builtin 'rest' not supported: %.*s", str8_va(object_name(arg->tag)));
+    return object_from_error(arena, error);
+  }
+
+  ObjectArray src = arg->data.array;
+
+  if (src.len == 0)
+  {
+    return OBJECT_NULL;
+  }
+
+  usize len = src.len - 1;
+
+  Object const **elements;
+  if (len > 0)
+  {
+    elements = arena_alloc_tn(arena, Object const *, len);
+    memcpy(elements, src.elements + 1, len * sizeof(Object const *));
+  }
+  else
+  {
+    elements = 0;
+  }
+
+  return object_from_array(arena, elements, len);
+}
+
+internal Object const *
+eval_builtin_push(Arena *arena, Object const **args, u8 arg_count)
+{
+  if (arg_count != 2)
+  {
+    Str8 error = str8_f(arena, "builtin 'push' requires 2 argument, received: %u", arg_count);
+    return object_from_error(arena, error);
+  }
+
+  Object const *arg1 = args[0];
+  Object const *arg2 = args[1];
+
+  if (arg1->tag != ObjectKind_Array)
+  {
+    Str8 error =
+    str8_f(arena, "argument to builtin 'push' not supported: %.*s", str8_va(object_name(arg1->tag)));
+    return object_from_error(arena, error);
+  }
+
+  ObjectArray src         = arg1->data.array;
+  usize len               = src.len + 1;
+  Object const **elements = arena_alloc_tn(arena, Object const *, len);
+  elements[src.len]       = arg2;
+
+  memcpy(elements, src.elements, src.len * sizeof(Object const *));
+
+  return object_from_array(arena, elements, len);
 }
 
 internal Object const *
@@ -2903,6 +2971,14 @@ internal Object const *builtin_len = &(Object){ .tag               = ObjectKind_
                                                 .data.builtin.name = str8_lit("len"),
                                                 .data.builtin.fn   = eval_builtin_len };
 
+internal Object const *builtin_rest = &(Object){ .tag               = ObjectKind_Builtin,
+                                                 .data.builtin.name = str8_lit("rest"),
+                                                 .data.builtin.fn   = eval_builtin_rest };
+
+internal Object const *builtin_push = &(Object){ .tag               = ObjectKind_Builtin,
+                                                 .data.builtin.name = str8_lit("push"),
+                                                 .data.builtin.fn   = eval_builtin_push };
+
 internal Object const *builtin_puts = &(Object){ .tag               = ObjectKind_Builtin,
                                                  .data.builtin.name = str8_lit("puts"),
                                                  .data.builtin.fn   = eval_builtin_puts };
@@ -2912,6 +2988,8 @@ env_builtin_init(Arena *arena)
 {
   env_init(env_builtin, arena, 0);
   env_set(env_builtin, builtin_len->data.builtin.name, builtin_len);
+  env_set(env_builtin, builtin_rest->data.builtin.name, builtin_rest);
+  env_set(env_builtin, builtin_push->data.builtin.name, builtin_push);
   env_set(env_builtin, builtin_puts->data.builtin.name, builtin_puts);
 }
 
@@ -4956,6 +5034,18 @@ test_eval_builtin_len(void)
       .expected = 11,
     },
     {
+      str8_lit("len([])"),
+      .expected = 0,
+    },
+    {
+      str8_lit("len([2])"),
+      .expected = 1,
+    },
+    {
+      str8_lit("len([2,5,8])"),
+      .expected = 3,
+    },
+    {
       str8_lit("len(1)"),
       .err = str8_lit("argument to builtin 'len' not supported: Number"),
     },
@@ -4995,6 +5085,186 @@ test_eval_builtin_len(void)
                     "expected error '%.*s', evaluated '%.*s'",
                     str8_va(tests[i].err),
                     str8_va(result->data.err.value));
+    }
+
+    scratch_end(scratch);
+  }
+
+  return 0;
+}
+
+internal int
+test_eval_builtin_rest(void)
+{
+  struct
+  {
+    Str8 input;
+    s64 expected[8];
+    usize expected_len;
+    b8 is_null;
+    Str8 err;
+  } tests[] = {
+    {
+      str8_lit("rest([1, 2, 3])"),
+      .expected     = { 2, 3 },
+      .expected_len = 2,
+    },
+    {
+      str8_lit("rest([2, 4, 6, 8])"),
+      .expected     = { 4, 6, 8 },
+      .expected_len = 3,
+    },
+    {
+      str8_lit("rest([1])"),
+      .expected_len = 0,
+    },
+    {
+      str8_lit("rest([])"),
+      .is_null = true,
+    },
+    {
+      str8_lit("rest(1)"),
+      .err = str8_lit("argument to builtin 'rest' not supported: Number"),
+    },
+    {
+      str8_lit("rest()"),
+      .err = str8_lit("builtin 'rest' requires 1 argument, received: 0"),
+    },
+    {
+      str8_lit("rest([1], [2])"),
+      .err = str8_lit("builtin 'rest' requires 1 argument, received: 2"),
+    },
+  };
+
+  for (usize i = 0; i < arr_count(tests); i++)
+  {
+    TmpArena scratch = scratch_begin(0);
+
+    Parser p = parse(scratch.arena, tests[i].input);
+    test_helper(test_parse_check_messages(&p));
+
+    Env env = { 0 };
+    env_init(&env, scratch.arena, 0);
+
+    Object const *result = eval_program(scratch.arena, p.statements, &env);
+    if (tests[i].err.buf != 0)
+    {
+      test_assert_m(result->tag == ObjectKind_Error, "expected error object");
+      test_assert_m(str8_equal(tests[i].err, result->data.err.value),
+                    "expected error '%.*s', evaluated '%.*s'",
+                    str8_va(tests[i].err),
+                    str8_va(result->data.err.value));
+    }
+    else if (tests[i].is_null)
+    {
+      test_assert_m(result->tag == ObjectKind_Null,
+                    "expected null object, evaluated '%.*s'",
+                    str8_va(object_name(result->tag)));
+    }
+    else
+    {
+      test_assert_m(result->tag == ObjectKind_Array, "expected array object");
+      test_assert_m(result->data.array.len == tests[i].expected_len,
+                    "expected %zu array elements, evaluated %zu",
+                    tests[i].expected_len,
+                    result->data.array.len);
+
+      for (usize j = 0; j < tests[i].expected_len; j++)
+      {
+        Object const *element = result->data.array.elements[j];
+        test_assert_m(element->tag == ObjectKind_Number, "expected number array element");
+        test_assert_m(element->data.number.value == tests[i].expected[j],
+                      "expected array element '%lld', evaluated '%lld'",
+                      tests[i].expected[j],
+                      element->data.number.value);
+      }
+    }
+
+    scratch_end(scratch);
+  }
+
+  return 0;
+}
+
+internal int
+test_eval_builtin_push(void)
+{
+  struct
+  {
+    Str8 input;
+    s64 expected[8];
+    usize expected_len;
+    Str8 err;
+  } tests[] = {
+    {
+      str8_lit("push([], 1)"),
+      .expected     = { 1 },
+      .expected_len = 1,
+    },
+    {
+      str8_lit("push([1], 2)"),
+      .expected     = { 1, 2 },
+      .expected_len = 2,
+    },
+    {
+      str8_lit("push([1, 2], 3)"),
+      .expected     = { 1, 2, 3 },
+      .expected_len = 3,
+    },
+    {
+      str8_lit("push(1, 2)"),
+      .err = str8_lit("argument to builtin 'push' not supported: Number"),
+    },
+    {
+      str8_lit("push()"),
+      .err = str8_lit("builtin 'push' requires 2 argument, received: 0"),
+    },
+    {
+      str8_lit("push([1])"),
+      .err = str8_lit("builtin 'push' requires 2 argument, received: 1"),
+    },
+    {
+      str8_lit("push([1], 2, 3)"),
+      .err = str8_lit("builtin 'push' requires 2 argument, received: 3"),
+    },
+  };
+
+  for (usize i = 0; i < arr_count(tests); i++)
+  {
+    TmpArena scratch = scratch_begin(0);
+
+    Parser p = parse(scratch.arena, tests[i].input);
+    test_helper(test_parse_check_messages(&p));
+
+    Env env = { 0 };
+    env_init(&env, scratch.arena, 0);
+
+    Object const *result = eval_program(scratch.arena, p.statements, &env);
+    if (tests[i].err.buf != 0)
+    {
+      test_assert_m(result->tag == ObjectKind_Error, "expected error object");
+      test_assert_m(str8_equal(tests[i].err, result->data.err.value),
+                    "expected error '%.*s', evaluated '%.*s'",
+                    str8_va(tests[i].err),
+                    str8_va(result->data.err.value));
+    }
+    else
+    {
+      test_assert_m(result->tag == ObjectKind_Array, "expected array object");
+      test_assert_m(result->data.array.len == tests[i].expected_len,
+                    "expected %zu array elements, evaluated %zu",
+                    tests[i].expected_len,
+                    result->data.array.len);
+
+      for (usize j = 0; j < tests[i].expected_len; j++)
+      {
+        Object const *element = result->data.array.elements[j];
+        test_assert_m(element->tag == ObjectKind_Number, "expected number array element");
+        test_assert_m(element->data.number.value == tests[i].expected[j],
+                      "expected array element '%lld', evaluated '%lld'",
+                      tests[i].expected[j],
+                      element->data.number.value);
+      }
     }
 
     scratch_end(scratch);
@@ -5205,6 +5475,8 @@ test(void)
   result += test_eval_string_index_expr();
 
   result += test_eval_builtin_len();
+  result += test_eval_builtin_rest();
+  result += test_eval_builtin_push();
 
   result += test_eval_return_stmt();
   result += test_eval_let_stmt();
