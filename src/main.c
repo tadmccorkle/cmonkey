@@ -2323,8 +2323,12 @@ eval_inspect(Arena *arena, Object const *o)
         }
       }
       str8_append_lit(&b, ") { ");
-      parse_build_stmt_string(&b, o->data.function.body->statements);
-      str8_append_lit(&b, " }");
+      if (o->data.function.body->statements != 0)
+      {
+        parse_build_stmt_string(&b, o->data.function.body->statements);
+        str8_append_lit(&b, " ");
+      }
+      str8_append_lit(&b, "}");
 
       return str8_build(&b);
     }
