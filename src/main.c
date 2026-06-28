@@ -32,21 +32,6 @@
 
 #define align_up(p, a) (((usize)(p) + ((usize)(a) - 1)) & (~((usize)(a) - 1)))
 
-#if defined(__GNUC__) || defined(__clang__)
-#  if UINTPTR_MAX == 0xFFFFFFFF
-#    define next_pow2(x) x <= 1 ? 2 : ((usize)1 << (32 - __builtin_clz((usize)(x) - 1)))
-#  else
-#    define next_pow2(x) x <= 1 ? 2 : ((usize)1 << (64 - __builtin_clzl((usize)(x) - 1)))
-#  endif
-#elif defined(_MSC_VER)
-#  include <intrin.h>
-#  if UINTPTR_MAX == 0xFFFFFFFF
-#    define next_pow2(x) x <= 1 ? 2 : ((usize)1 << (32 - __lzcnt((usize)(x) - 1)))
-#  else
-#    define next_pow2(x) x <= 1 ? 2 : ((usize)1 << (64 - __lzcnt64((usize)(x) - 1)))
-#  endif
-#endif
-
 #define arr_count(a) sizeof(a) / sizeof(*a)
 
 #define DEFER_LOOP(begin, end) for (int _i_ = ((begin), 0); !_i_; _i_ += 1, (end))
@@ -73,6 +58,37 @@ typedef double f64;
 #else
 #  define ATTRIB_FMT(fmt_idx, args_idx)
 #endif
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-function"
+
+internal usize
+usize_to_pow2(usize x)
+{
+  if (x == 0) return 1;
+
+  assert(x < ((usize)1 << (sizeof(usize) * 8 - 1)));
+
+  x -= 1;
+
+#if defined(__GNUC__) || defined(__clang__)
+#  if UINTPTR_MAX > 0xFFFFFFFF
+  return (usize)1 << (64 - __builtin_clzll((unsigned long long)x));
+#  else
+  return (usize)1 << (32 - __builtin_clzl((unsigned long)x));
+#  endif
+#else
+  x |= x >> 1;
+  x |= x >> 2;
+  x |= x >> 4;
+  x |= x >> 8;
+  x |= x >> 16;
+#  if UINTPTR_MAX > 0xFFFFFFFF
+  x |= x >> 32;
+#  endif
+  return x + 1;
+#endif
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 // ll
@@ -112,9 +128,6 @@ typedef double f64;
 
 ////////////////////////////////////////////////////////////////////////////////
 // arena
-
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wunused-function"
 
 #define ARENA_DEFAULT_SIZE MiB(2)
 
@@ -335,13 +348,8 @@ tl_scratch_arena_get(Arena **conflicts, usize conflict_count)
 
 #define scratch_end(scratch) arena_tmp_end(scratch)
 
-#pragma clang diagnostic pop
-
 ////////////////////////////////////////////////////////////////////////////////
 // strings
-
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wunused-function"
 
 typedef struct Str8 Str8;
 struct Str8
