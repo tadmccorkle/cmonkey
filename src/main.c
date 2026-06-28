@@ -360,6 +360,12 @@ str8(u8 const *value, usize length)
   return (Str8){ value, length };
 }
 
+internal Str8
+str8_from_cstr(char const *c)
+{
+  return str8((u8 const *)c, strlen(c));
+}
+
 internal Str8 str8_fv(Arena *arena, char const *fmt, va_list args) ATTRIB_FMT(2, 0);
 internal Str8 str8_f(Arena *arena, char const *fmt, ...) ATTRIB_FMT(2, 3);
 
@@ -394,12 +400,6 @@ str8_f(Arena *arena, char const *fmt, ...)
 }
 
 internal Str8
-str8_from_cstr(char const *c)
-{
-  return str8((u8 const *)c, strlen(c));
-}
-
-internal Str8
 str8_copy(Arena *arena, Str8 s)
 {
   u8 *buf    = arena_alloc_tn_nz(arena, u8, s.len + 1);
@@ -408,6 +408,72 @@ str8_copy(Arena *arena, Str8 s)
   memcpy(buf, s.buf, s.len);
 
   return str8(buf, s.len);
+}
+
+internal Str8
+str8_concat(Arena *arena, Str8 s1, Str8 s2)
+{
+  usize len = s1.len + s2.len;
+  u8 *buf   = arena_alloc_tn_nz(arena, u8, len + 1);
+  buf[len]  = 0;
+
+  memcpy(buf, s1.buf, s1.len);
+  memcpy(buf + s1.len, s2.buf, s2.len);
+
+  return str8(buf, len);
+}
+
+internal bool
+str8_equal(Str8 a, Str8 b)
+{
+  return a.len == b.len && (a.buf == b.buf || a.len == 0 || memcmp(a.buf, b.buf, a.len) == 0);
+}
+
+internal bool
+str8_is_space(u8 c)
+{
+  return c == ' ' || c - '\t' < 5;
+}
+
+internal Str8
+str8_trim_l(Str8 s)
+{
+  if (s.len > 0)
+  {
+    usize trimmed = 0;
+    while (trimmed < s.len && str8_is_space(s.buf[trimmed]))
+    {
+      trimmed++;
+    }
+    s.buf += trimmed;
+    s.len -= trimmed;
+  }
+
+  return s;
+}
+
+internal Str8
+str8_trim_r(Str8 s)
+{
+  if (s.len > 0)
+  {
+    usize trimmed = 0;
+    usize i       = s.len;
+    while (i > 0 && str8_is_space(s.buf[i - 1]))
+    {
+      i--;
+      trimmed++;
+    }
+    s.len -= trimmed;
+  }
+
+  return s;
+}
+
+internal Str8
+str8_trim(Str8 s)
+{
+  return str8_trim_l(str8_trim_r(s));
 }
 
 internal Str8
@@ -453,25 +519,6 @@ str8_chop(Str8 s, usize count)
 {
   s.len -= min(count, s.len);
   return s;
-}
-
-internal Str8
-str8_concat(Arena *arena, Str8 s1, Str8 s2)
-{
-  usize len = s1.len + s2.len;
-  u8 *buf   = arena_alloc_tn_nz(arena, u8, len + 1);
-  buf[len]  = 0;
-
-  memcpy(buf, s1.buf, s1.len);
-  memcpy(buf + s1.len, s2.buf, s2.len);
-
-  return str8(buf, len);
-}
-
-internal bool
-str8_equal(Str8 a, Str8 b)
-{
-  return a.len == b.len && (a.len == 0 || memcmp(a.buf, b.buf, a.len) == 0);
 }
 
 #define STR8_BUILDER_DEFAULT_CAPACITY 256
@@ -589,12 +636,6 @@ str8_dump(StrBuilder8 *builder, Arena *arena)
 
 ////////////////////////////////////////////////////////////////////////////////
 // lex
-
-internal bool
-is_whitespace(u8 ch)
-{
-  return ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n' || ch == '\v' || ch == '\f';
-}
 
 internal bool
 is_digit(u8 ch)
@@ -720,7 +761,7 @@ lex_init(Lexer *l, Str8 input)
 internal void
 lex_consume_whitespace(Lexer *l)
 {
-  while (l->pos < l->input.len && is_whitespace(l->input.buf[l->pos]))
+  while (l->pos < l->input.len && str8_is_space(l->input.buf[l->pos]))
   {
     l->pos += 1;
   }
@@ -3158,7 +3199,13 @@ repl(void)
     }
 
     Str8 input = str8_copy(arena, str8_from_cstr(buffer));
-    Parser p   = parse(arena, input);
+
+    if (str8_equal(str8_trim(input), str8_lit("exit")))
+    {
+      return 0;
+    }
+
+    Parser p = parse(arena, input);
 
     parse_print_messages(&p);
 
