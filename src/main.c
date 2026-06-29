@@ -26,13 +26,13 @@
 #define max(a, b)      (((a) > (b)) ? (a) : (b))
 #define clamp(a, x, b) (((x) < (a)) ? (a) : ((x) > (b)) ? (b) : (x))
 
-#define ceil_pos(T, x) ((x - (T)(x)) > 0 ? (T)(x + 1) : (T)(x))
+#define ceil_pos(T, x) (((x) - (T)(x)) > 0 ? (T)((x) + 1) : (T)(x))
 #define ceil_neg(T, x) (T)(x)
-#define ceil(T, x)     (((x) > 0) ? ceil_pos(x) : ceil_neg(x))
+#define ceil(T, x)     (((x) > 0) ? ceil_pos(T, x) : ceil_neg(T, x))
 
 #define align_up(p, a) (((usize)(p) + ((usize)(a) - 1)) & (~((usize)(a) - 1)))
 
-#define arr_count(a) sizeof(a) / sizeof(*a)
+#define arr_count(a) (sizeof(a) / sizeof(*a))
 
 #define DEFER_LOOP(begin, end) for (int _i_ = ((begin), 0); !_i_; _i_ += 1, (end))
 
@@ -2185,7 +2185,7 @@ env_init(Env *env, Arena *arena, u32 initial_capacity)
 }
 
 #define env_init_count(env, arena, initial_count) \
-  env_init((env), (arena), ceil_pos(u32, (initial_count) / ENV_LOAD_FACTOR));
+  env_init((env), (arena), ceil_pos(u32, (initial_count) / ENV_LOAD_FACTOR))
 
 internal EnvVar *
 env_find(Env const *env, Str8 name)
@@ -2415,7 +2415,7 @@ object_hash_init(ObjectHash *hash, Arena *arena, u32 initial_capacity)
 }
 
 #define object_hash_init_count(hash, arena, initial_count) \
-  object_hash_init((hash), (arena), ceil_pos(u32, (initial_count) / OBJECT_HASH_LOAD_FACTOR));
+  object_hash_init((hash), (arena), ceil_pos(u32, (initial_count) / OBJECT_HASH_LOAD_FACTOR))
 
 internal u32
 object_hash(Object const *key)
@@ -4670,7 +4670,7 @@ test_parse_expr_hash(void)
     AstExpr *expr = stmt->data.expr.expr;
     test_assert_m(expr != 0, "expected hash expression is null");
     test_assert_m(expr->tag == AstExpr_Hash, "expected hash expression");
-    test_assert_m(expr->data.array.elements == 0, "expected empty hash, parsed elements");
+    test_assert_m(expr->data.hash.pairs == 0, "expected empty hash, parsed elements");
 
     scratch_end(scratch);
   }
