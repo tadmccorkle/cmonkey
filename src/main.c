@@ -690,6 +690,7 @@ is_escapable_char(u8 ch)
                                \
   /* delimiters */             \
   X(Comma)                     \
+  X(Colon)                     \
   X(Semicolon)                 \
   X(LParen)                    \
   X(RParen)                    \
@@ -838,6 +839,7 @@ lex_advance_token(Lexer *l, Token *token)
     case '/': lex_init_token(l, token, 1, TokenKind_Slash); break;
     case '<': lex_init_token(l, token, 1, TokenKind_Less); break;
     case '>': lex_init_token(l, token, 1, TokenKind_Greater); break;
+    case ':': lex_init_token(l, token, 1, TokenKind_Colon); break;
     case ';': lex_init_token(l, token, 1, TokenKind_Semicolon); break;
     case '(': lex_init_token(l, token, 1, TokenKind_LParen); break;
     case ')': lex_init_token(l, token, 1, TokenKind_RParen); break;
@@ -1004,6 +1006,7 @@ typedef enum
   X(Boolean)              \
   X(String)               \
   X(Array)                \
+  X(Hash)                 \
   X(Prefix)               \
   X(Infix)                \
   X(IfElse)               \
@@ -1083,6 +1086,22 @@ struct AstExprArray
   usize count;
 };
 
+typedef struct AstExprHashPair AstExprHashPair;
+struct AstExprHashPair
+{
+  AstExprHashPair *next;
+  AstExpr *key;
+  AstExpr *val;
+};
+
+typedef struct AstExprHash AstExprHash;
+struct AstExprHash
+{
+  Token token; // The '{' token
+  AstExprHashPair *pairs;
+  usize count;
+};
+
 typedef struct AstExprPrefix AstExprPrefix;
 struct AstExprPrefix
 {
@@ -1157,6 +1176,7 @@ struct AstExpr
     AstExprBoolean boolean;
     AstExprString string;
     AstExprArray array;
+    AstExprHash hash;
     AstExprPrefix prefix;
     AstExprInfix infix;
     AstExprIfElse if_else;
@@ -1264,6 +1284,23 @@ parse_build_expr_string(StrBuilder8 *b, AstExpr *expr)
         }
       }
       str8_append_lit(b, "]");
+      break;
+
+    case AstExpr_Hash:
+      str8_append_lit(b, "{");
+      if (expr->data.hash.pairs != 0)
+      {
+        AstExprHashPair *element = expr->data.hash.pairs;
+        for (;;)
+        {
+          parse_build_expr_string(b, element->key);
+          str8_append_lit(b, ":");
+          parse_build_expr_string(b, element->val);
+          if ((element = element->next) == 0) break;
+          str8_append_lit(b, ", ");
+        }
+      }
+      str8_append_lit(b, "}");
       break;
 
     case AstExpr_Prefix:
@@ -1727,6 +1764,58 @@ parse_expr_array(Parser *p)
 }
 
 internal AstExpr *
+parse_expr_hash(Parser *p)
+{
+  AstExpr *hash         = arena_alloc_t(p->arena, AstExpr);
+  hash->tag             = AstExpr_Hash;
+  hash->data.hash.token = p->curr_token;
+
+  if (p->peek_token.kind != TokenKind_RBrace)
+  {
+    SLL_BUILDER(AstExprHashPair) elements;
+    sll_builder_init(elements);
+
+    for (;;)
+    {
+      parse_advance_token(p);
+
+      AstExprHashPair *element = arena_alloc_t(p->arena, AstExprHashPair);
+      element->key             = parse_expr(p, Precedence_Lowest);
+
+      if (!parse_expect(p, TokenKind_Colon))
+      {
+        break;
+      }
+      parse_advance_token(p);
+
+      element->val = parse_expr(p, Precedence_Lowest);
+
+      sll_builder_append(elements, element);
+
+      if (p->peek_token.kind == TokenKind_RBrace)
+      {
+        parse_advance_token(p);
+        break;
+      }
+
+      if (!parse_expect(p, TokenKind_Comma))
+      {
+        break;
+      }
+    }
+
+    hash->data.hash.pairs = sll_builder_result(elements);
+    hash->data.hash.count = elements.count;
+  }
+  else
+  {
+    parse_advance_token(p);
+  }
+
+  return hash;
+}
+
+internal AstExpr *
 parse_expr_grouped(Parser *p)
 {
   parse_advance_token(p);
@@ -1746,6 +1835,7 @@ parse_expr_prefix(Parser *p)
     case TokenKind_If: return parse_expr_if_else(p);
     case TokenKind_Function: return parse_expr_function(p);
     case TokenKind_LBracket: return parse_expr_array(p);
+    case TokenKind_LBrace: return parse_expr_hash(p);
     case TokenKind_LParen: return parse_expr_grouped(p);
 
     case TokenKind_True:
@@ -2184,6 +2274,7 @@ internal Env *env_builtin = &(Env){ 0 };
   X(Boolean)            \
   X(String)             \
   X(Array)              \
+  X(Hash)               \
   X(Return)             \
   X(Function)           \
   X(Builtin)            \
@@ -2235,6 +2326,21 @@ struct ObjectArray
   usize len;
 };
 
+typedef struct ObjectHashPair ObjectHashPair;
+struct ObjectHashPair
+{
+  Object const *key;
+  Object const *val;
+};
+
+typedef struct ObjectHash ObjectHash;
+struct ObjectHash
+{
+  u32 cnt;
+  u32 cap;
+  ObjectHashPair *pairs;
+};
+
 typedef struct ObjectNull ObjectNull;
 struct ObjectNull
 {
@@ -2277,6 +2383,7 @@ struct Object
     ObjectBoolean boolean;
     ObjectString string;
     ObjectArray array;
+    ObjectHash hash;
     ObjectReturn ret;
     ObjectFunction function;
     ObjectBuiltin builtin;
@@ -2288,6 +2395,174 @@ struct Object
 internal Object const *OBJECT_TRUE  = &(Object){ ObjectKind_Boolean, { .boolean.value = true } };
 internal Object const *OBJECT_FALSE = &(Object){ ObjectKind_Boolean, { .boolean.value = false } };
 internal Object const *OBJECT_NULL  = &(Object){ ObjectKind_Null, { 0 } };
+
+#define OBJECT_HASH_LOAD_FACTOR 0.75
+
+internal bool
+object_hash_is_empty(ObjectHashPair p)
+{
+  return p.key == 0;
+}
+
+internal void
+object_hash_init(ObjectHash *hash, Arena *arena, u32 initial_capacity)
+{
+  u32 cap = max(initial_capacity, 4);
+
+  hash->cnt   = 0;
+  hash->cap   = cap;
+  hash->pairs = arena_alloc_tn(arena, ObjectHashPair, cap);
+}
+
+#define object_hash_init_count(hash, arena, initial_count) \
+  object_hash_init((hash), (arena), ceil_pos(u32, (initial_count) / OBJECT_HASH_LOAD_FACTOR));
+
+internal u32
+object_hash(Object const *key)
+{
+  const u32 mult = 16777619;
+
+  u32 hash = 2166136261;
+
+  switch (key->tag)
+  {
+    case ObjectKind_String:
+    {
+      for (usize i = 0; i < key->data.string.value.len; i++)
+      {
+        hash ^= (u32)key->data.string.value.buf[i];
+        hash *= mult;
+      }
+      break;
+    }
+    case ObjectKind_Number:
+    {
+      u64 n;
+      memcpy(&n, &key->data.number.value, sizeof(u64));
+      hash ^= (u32)(n ^ (n >> 32));
+      hash *= mult;
+      break;
+    }
+    case ObjectKind_Boolean:
+    {
+      hash ^= (u32)key->data.boolean.value;
+      hash *= mult;
+      break;
+    }
+
+    default: assert(0 && "Unsupported object hash type passed to hash function.");
+  }
+
+  return hash;
+}
+
+internal bool
+object_hash_equal(Object const *a, Object const *b)
+{
+  if (a->tag != b->tag) return false;
+
+  switch (a->tag)
+  {
+    case ObjectKind_String:
+    {
+      return str8_equal(a->data.string.value, b->data.string.value);
+    }
+    case ObjectKind_Number:
+    {
+      return a->data.number.value == b->data.number.value;
+    }
+    case ObjectKind_Boolean:
+    {
+      // NOTE(tad): Boolean and null objects should always reference singletons.
+      return a == b;
+    }
+
+    default: assert(0 && "Unsupported object hash type passed to hash function.");
+  }
+
+  return false;
+}
+
+internal bool
+object_hash_is_key_type(Object const *a)
+{
+  return a->tag == ObjectKind_String || a->tag == ObjectKind_Number || a->tag == ObjectKind_Boolean;
+}
+
+internal ObjectHashPair *
+object_hash_find(ObjectHash const *hash, Object const *key)
+{
+  u32 cap = hash->cap;
+  u32 h   = object_hash(key) % cap;
+
+  for (;;)
+  {
+    ObjectHashPair *p = &hash->pairs[h];
+
+    if (object_hash_is_empty(*p) || object_hash_equal(p->key, key))
+    {
+      return p;
+    }
+
+    h = (h + 1) % cap;
+  }
+}
+
+internal void
+object_hash_grow(Arena *arena, ObjectHash *hash)
+{
+  TmpArena scratch = scratch_begin(arena);
+
+  u32 old_cap = hash->cap;
+  u32 new_cap = old_cap * 2;
+
+  ObjectHashPair *old_pairs = arena_alloc_tn_nz(scratch.arena, ObjectHashPair, old_cap);
+  memcpy(old_pairs, hash->pairs, old_cap * sizeof(*hash->pairs));
+
+  ObjectHashPair *new_pairs =
+  arena_realloc_t_nz(arena, hash->pairs, ObjectHashPair, hash->cap, new_cap);
+  memset(new_pairs, 0, new_cap * sizeof(*hash->pairs));
+
+  hash->pairs = new_pairs;
+  hash->cap   = new_cap;
+
+  for (usize i = 0; i < old_cap; i++)
+  {
+    ObjectHashPair old_pair = old_pairs[i];
+    if (!object_hash_is_empty(old_pair))
+    {
+      ObjectHashPair *p = object_hash_find(hash, old_pair.key);
+      *p                = old_pair;
+    }
+  }
+
+  scratch_end(scratch);
+}
+
+internal Object const *
+object_hash_get(ObjectHash const *hash, Object const *key)
+{
+  Object const *value = object_hash_find(hash, key)->val;
+  return value != 0 ? value : OBJECT_NULL;
+}
+
+internal void
+object_hash_set(Arena *arena, ObjectHash *hash, Object const *key, Object const *val)
+{
+  if (hash->cnt + 1 > hash->cap * OBJECT_HASH_LOAD_FACTOR)
+  {
+    object_hash_grow(arena, hash);
+  }
+
+  ObjectHashPair *p = object_hash_find(hash, key);
+  if (object_hash_is_empty(*p))
+  {
+    hash->cnt += 1;
+  }
+
+  p->key = key;
+  p->val = val;
+}
 
 internal Str8
 eval_inspect(Arena *arena, Object const *o)
@@ -2313,6 +2588,34 @@ eval_inspect(Arena *arena, Object const *o)
         str8_append(&b, eval_inspect(arena, o->data.array.elements[i]));
       }
       str8_append_lit(&b, "]");
+
+      return str8_build(&b);
+    }
+    case ObjectKind_Hash:
+    {
+      StrBuilder8 b = str8_builder_create_default(arena);
+      str8_append_lit(&b, "{");
+      if (o->data.hash.cnt > 0)
+      {
+        usize inspected = 0;
+        for (usize i = 0; i < o->data.hash.cap; i++)
+        {
+          ObjectHashPair p = o->data.hash.pairs[i];
+          if (!object_hash_is_empty(p))
+          {
+            inspected++;
+
+            str8_append(&b, eval_inspect(arena, o->data.hash.pairs[i].key));
+            str8_append_lit(&b, ":");
+            str8_append(&b, eval_inspect(arena, o->data.hash.pairs[i].val));
+
+            if (inspected == o->data.hash.cnt) break;
+
+            str8_append_lit(&b, ", ");
+          }
+        }
+      }
+      str8_append_lit(&b, "}");
 
       return str8_build(&b);
     }
@@ -2362,6 +2665,8 @@ internal Object const *eval_expr_infix(Arena *arena, AstExprInfix infix, Env *en
 internal Object const *eval_expr_if_else(Arena *arena, AstExprIfElse if_else, Env *env);
 internal Object const *eval_expr_call(Arena *arena, AstExprCall call, Env *env);
 internal Object const *eval_expr_array(Arena *arena, AstExprArray array, Env *env);
+internal Object const *eval_expr_hash(Arena *arena, AstExprHash hash, Env *env);
+internal Object const *eval_expr_index(Arena *arena, AstExprIndex index, Env *env);
 
 internal Object const *
 object_from_number(Arena *arena, s64 value)
@@ -2565,8 +2870,7 @@ eval_expr_infix(Arena *arena, AstExprInfix infix, Env *env)
   {
     switch (op)
     {
-      // NOTE(tad): Non-number equality is determined by reference comparisons.
-      // Boolean and null objects should always reference singletons.
+      // NOTE(tad): Boolean and null objects should always reference singletons.
       case TokenKind_Equal: result = object_from_bool(lhs == rhs); break;
       case TokenKind_NotEqual: result = object_from_bool(lhs != rhs); break;
       default:
@@ -2723,7 +3027,7 @@ eval_expr_array(Arena *arena, AstExprArray array, Env *env)
   Object const **elements = array.count > 0 ? arena_alloc_tn(arena, Object const *, array.count) : 0;
 
   AstExprArrayElement *element_expr = array.elements;
-  for (u8 i = 0; element_expr != 0 && i < array.count; i++)
+  for (usize i = 0; element_expr != 0 && i < array.count; i++)
   {
     Object const *element = eval_expr(arena, element_expr->value, env);
     if (object_is_error(element)) return element;
@@ -2733,6 +3037,35 @@ eval_expr_array(Arena *arena, AstExprArray array, Env *env)
   }
 
   return object_from_array(arena, elements, array.count);
+}
+
+internal Object const *
+eval_expr_hash(Arena *arena, AstExprHash hash, Env *env)
+{
+  Object *result = arena_alloc_t(arena, Object);
+  result->tag    = ObjectKind_Hash;
+
+  object_hash_init_count(&result->data.hash, arena, hash.count);
+
+  AstExprHashPair *p = hash.pairs;
+  for (usize i = 0; p != 0 && i < hash.count; p = p->next, i++)
+  {
+    Object const *k = eval_expr(arena, p->key, env);
+    if (object_is_error(k)) return k;
+
+    if (!object_hash_is_key_type(k))
+    {
+      Str8 error = str8_f(arena, "invalid hash key type: %.*s", str8_va(object_name(k->tag)));
+      return object_from_error(arena, error);
+    }
+
+    Object const *v = eval_expr(arena, p->val, env);
+    if (object_is_error(v)) return v;
+
+    object_hash_set(arena, &result->data.hash, k, v);
+  }
+
+  return result;
 }
 
 internal Object const *
@@ -2782,6 +3115,17 @@ eval_expr_index(Arena *arena, AstExprIndex index_expr, Env *env)
       return eval_index_string(arena, target->data.string, index->data.number);
     }
 
+    case ObjectKind_Hash:
+    {
+      if (!object_hash_is_key_type(index))
+      {
+        Str8 error = str8_f(arena, "invalid hash index type: %.*s", str8_va(object_name(index->tag)));
+        return object_from_error(arena, error);
+      }
+
+      return object_hash_get(&target->data.hash, index);
+    }
+
     default:
     {
       Str8 error =
@@ -2821,6 +3165,7 @@ eval_expr(Arena *arena, AstExpr *expr, Env *env)
     case AstExpr_IfElse: return eval_expr_if_else(arena, expr->data.if_else, env);
     case AstExpr_Call: return eval_expr_call(arena, expr->data.call, env);
     case AstExpr_Array: return eval_expr_array(arena, expr->data.array, env);
+    case AstExpr_Hash: return eval_expr_hash(arena, expr->data.hash, env);
     case AstExpr_Index: return eval_expr_index(arena, expr->data.index, env);
 
     default: return OBJECT_NULL;
@@ -3287,7 +3632,7 @@ test_lex(void)
                         "\n"
                         "let result = add(five, ten);"
                         "\n"
-                        "!-/*5;\n"
+                        "!-/*5:;\n"
                         "5 < 10 > 5\n"
                         "\n"
                         "if (5 < 10) {\n"
@@ -3354,6 +3699,7 @@ test_lex(void)
     test_result(TokenKind_Slash, "/"),
     test_result(TokenKind_Star, "*"),
     test_result(TokenKind_Number, "5"),
+    test_result(TokenKind_Colon, ":"),
     test_result(TokenKind_Semicolon, ";"),
     test_result(TokenKind_Number, "5"),
     test_result(TokenKind_Less, "<"),
@@ -3472,6 +3818,21 @@ test_boolean_expr(AstExpr *expr, b8 expected)
 }
 
 internal int
+test_string_expr(AstExpr *expr, Str8 expected)
+{
+  test_assert_m(expr != 0, "expected string expression is null");
+  test_assert_m(expr->tag == AstExpr_String, "expected string expression");
+
+  Str8 actual = expr->data.string.value;
+  test_assert_m(str8_equal(actual, expected),
+                "expected string expression '%.*s', parsed '%.*s'",
+                str8_va(expected),
+                str8_va(actual));
+
+  return 0;
+}
+
+internal int
 test_literal_expr(AstExpr *expr, AstExprKind expected_kind, void *expected)
 {
   switch (expected_kind)
@@ -3479,6 +3840,7 @@ test_literal_expr(AstExpr *expr, AstExprKind expected_kind, void *expected)
     case AstExpr_Identifier: test_helper(test_identifier_expr(expr, *(Str8 *)expected)); break;
     case AstExpr_Number: test_helper(test_number_expr(expr, *(s64 *)expected)); break;
     case AstExpr_Boolean: test_helper(test_boolean_expr(expr, *(b8 *)expected)); break;
+    case AstExpr_String: test_helper(test_string_expr(expr, *(Str8 *)expected)); break;
 
     default: test_fail("invalid AST expression kind for literal");
   }
@@ -4204,7 +4566,7 @@ test_parse_expr_string(void)
 internal int
 test_parse_expr_array(void)
 {
-  // empty array: []
+  // empty: []
   {
     TmpArena scratch = scratch_begin(0);
 
@@ -4283,6 +4645,98 @@ test_parse_expr_array(void)
                                     expected_lit(AstExpr_Number, s64, 3)));
 
     test_assert_m(element->next == 0, "expected three array elements, parsed more");
+
+    scratch_end(scratch);
+  }
+
+  return 0;
+}
+
+internal int
+test_parse_expr_hash(void)
+{
+  // empty: {}
+  {
+    TmpArena scratch = scratch_begin(0);
+
+    Parser p = parse(scratch.arena, str8_lit("{}"));
+    test_helper(test_parse_check_messages(&p));
+
+    AstStmt *stmt = p.statements;
+    test_assert_m(stmt != 0, "expected hash expression statement is null");
+    test_assert_m(stmt->next == 0, "expected one statement, parsed more");
+    test_assert_m(stmt->tag == AstStmt_Expr, "expected expression statement");
+
+    AstExpr *expr = stmt->data.expr.expr;
+    test_assert_m(expr != 0, "expected hash expression is null");
+    test_assert_m(expr->tag == AstExpr_Hash, "expected hash expression");
+    test_assert_m(expr->data.array.elements == 0, "expected empty hash, parsed elements");
+
+    scratch_end(scratch);
+  }
+
+  // single element: {"key": 1}
+  {
+    TmpArena scratch = scratch_begin(0);
+
+    Parser p = parse(scratch.arena, str8_lit("{\"key\": 1}"));
+    test_helper(test_parse_check_messages(&p));
+
+    AstStmt *stmt = p.statements;
+    test_assert_m(stmt != 0, "expected hash expression statement is null");
+    test_assert_m(stmt->next == 0, "expected one statement, parsed more");
+    test_assert_m(stmt->tag == AstStmt_Expr, "expected expression statement");
+
+    AstExpr *expr = stmt->data.expr.expr;
+    test_assert_m(expr != 0, "expected hash expression is null");
+    test_assert_m(expr->tag == AstExpr_Hash, "expected hash expression");
+
+    AstExprHashPair *element = expr->data.hash.pairs;
+    test_assert_m(element != 0, "expected one hash element, parsed zero");
+    test_helper(test_lit_expr(element->key, expected_lit(AstExpr_String, Str8, str8_lit("key"))));
+    test_helper(test_lit_expr(element->val, expected_lit(AstExpr_Number, s64, 1)));
+    test_assert_m(element->next == 0, "expected one hash element, parsed more");
+
+    scratch_end(scratch);
+  }
+
+  // multiple elements: {fn(){"one"}(): 1, true: 1 + 1, 3: 15 / 5}
+  {
+    TmpArena scratch = scratch_begin(0);
+
+    Parser p = parse(scratch.arena, str8_lit("{fn(){\"one\"}: 1, true: 1 + 1, 3: 15 / 5}"));
+    test_helper(test_parse_check_messages(&p));
+
+    AstStmt *stmt = p.statements;
+    test_assert_m(stmt != 0, "expected hash expression statement is null");
+    test_assert_m(stmt->next == 0, "expected one statement, parsed more");
+    test_assert_m(stmt->tag == AstStmt_Expr, "expected expression statement");
+
+    AstExpr *expr = stmt->data.expr.expr;
+    test_assert_m(expr != 0, "expected hash expression is null");
+    test_assert_m(expr->tag == AstExpr_Hash, "expected hash expression");
+
+    AstExprHashPair *element = expr->data.hash.pairs;
+    test_assert_m(element != 0, "expected three hash elements, parsed zero");
+    test_assert_m(element->key->tag == AstExpr_Function, "expected function expression");
+
+    element = element->next;
+    test_assert_m(element != 0, "expected three hash elements, parsed fewer");
+    test_helper(test_lit_expr(element->key, expected_lit(AstExpr_Boolean, bool, true)));
+    test_helper(test_infix_lit_expr(element->val,
+                                    TokenKind_Plus,
+                                    expected_lit(AstExpr_Number, s64, 1),
+                                    expected_lit(AstExpr_Number, s64, 1)));
+
+    element = element->next;
+    test_assert_m(element != 0, "expected three hash elements, parsed fewer");
+    test_helper(test_lit_expr(element->key, expected_lit(AstExpr_Number, s64, 3)));
+    test_helper(test_infix_lit_expr(element->val,
+                                    TokenKind_Slash,
+                                    expected_lit(AstExpr_Number, s64, 15),
+                                    expected_lit(AstExpr_Number, s64, 5)));
+
+    test_assert_m(element->next == 0, "expected three hash elements, parsed more");
 
     scratch_end(scratch);
   }
@@ -4610,6 +5064,99 @@ test_env_grow(void)
                   str8_va(names[i]),
                   got->data.number.value);
   }
+
+  scratch_end(scratch);
+  return 0;
+}
+
+internal int
+test_object_hash(void)
+{
+  TmpArena scratch = scratch_begin(0);
+
+  ObjectHash hash = { 0 };
+  object_hash_init(&hash, scratch.arena, 0);
+
+  // mixed key types
+  Object const *string_key = object_from_string(scratch.arena, str8_lit("key"));
+  Object const *number_key = object_from_number(scratch.arena, 42);
+  Object const *bool_key   = object_from_bool(true);
+
+  object_hash_set(scratch.arena, &hash, string_key, object_from_number(scratch.arena, 1));
+  object_hash_set(scratch.arena, &hash, number_key, object_from_number(scratch.arena, 2));
+  object_hash_set(scratch.arena, &hash, bool_key, object_from_number(scratch.arena, 3));
+
+  test_assert_m(hash.cnt == 3, "expected count of 3, got %u", hash.cnt);
+
+  Object const *string_val = object_hash_get(&hash, string_key);
+  test_assert_m(string_val->tag == ObjectKind_Number && string_val->data.number.value == 1,
+                "expected string key to map to value 1");
+
+  Object const *number_val = object_hash_get(&hash, number_key);
+  test_assert_m(number_val->tag == ObjectKind_Number && number_val->data.number.value == 2,
+                "expected number key to map to value 2");
+
+  Object const *bool_val = object_hash_get(&hash, bool_key);
+  test_assert_m(bool_val->tag == ObjectKind_Number && bool_val->data.number.value == 3,
+                "expected boolean key to map to value 3");
+
+  // distinct key objects with equal values resolve to the same slot
+  Object const *string_key_dup = object_from_string(scratch.arena, str8_lit("key"));
+  Object const *number_key_dup = object_from_number(scratch.arena, 42);
+  test_assert_m(object_hash_get(&hash, string_key_dup) == string_val,
+                "expected equal string key to resolve to same value");
+  test_assert_m(object_hash_get(&hash, number_key_dup) == number_val,
+                "expected equal number key to resolve to same value");
+
+  // overwrite keeps count stable and updates the value
+  object_hash_set(scratch.arena, &hash, number_key_dup, object_from_number(scratch.arena, 99));
+  test_assert_m(hash.cnt == 3, "expected count to remain 3 after overwrite, got %u", hash.cnt);
+  Object const *overwritten = object_hash_get(&hash, number_key);
+  test_assert_m(overwritten->tag == ObjectKind_Number && overwritten->data.number.value == 99,
+                "expected overwritten value 99, got %lld",
+                overwritten->data.number.value);
+
+  // absent key returns OBJECT_NULL
+  Object const *absent = object_hash_get(&hash, object_from_string(scratch.arena, str8_lit("missing")));
+  test_assert_m(absent == OBJECT_NULL, "expected OBJECT_NULL for absent key");
+
+  // force growth and verify all entries survive the rehash
+  u32 initial_cap = hash.cap;
+
+  enum
+  {
+    insert_count = 64
+  };
+  for (s64 i = 0; i < insert_count; i++)
+  {
+    object_hash_set(scratch.arena,
+                    &hash,
+                    object_from_number(scratch.arena, 1000 + i),
+                    object_from_number(scratch.arena, i));
+  }
+
+  test_assert_m(hash.cap > initial_cap,
+                "expected capacity to grow beyond %u after %d inserts, got %u",
+                initial_cap,
+                insert_count,
+                hash.cap);
+
+  for (s64 i = 0; i < insert_count; i++)
+  {
+    Object const *key = object_from_number(scratch.arena, 1000 + i);
+    Object const *got = object_hash_get(&hash, key);
+    test_assert_m(got->tag == ObjectKind_Number && got->data.number.value == i,
+                  "expected value %lld for key %lld after grow, got %lld",
+                  i,
+                  1000 + i,
+                  got->data.number.value);
+  }
+
+  // original entries still resolve after growth
+  test_assert_m(object_hash_get(&hash, string_key)->data.number.value == 1,
+                "expected string key to survive grow");
+  test_assert_m(object_hash_get(&hash, bool_key)->data.number.value == 3,
+                "expected boolean key to survive grow");
 
   scratch_end(scratch);
   return 0;
@@ -4969,7 +5516,148 @@ test_eval_array_expr(void)
 }
 
 internal int
-test_eval_array_index_expr(void)
+test_eval_hash_expr(void)
+{
+  // empty: {}
+  {
+    TmpArena scratch = scratch_begin(0);
+
+    Parser p = parse(scratch.arena, str8_lit("{}"));
+    test_helper(test_parse_check_messages(&p));
+
+    Env env = { 0 };
+    env_init(&env, scratch.arena, 0);
+
+    Object const *result = eval_program(scratch.arena, p.statements, &env);
+    test_assert_m(result->tag == ObjectKind_Hash, "expected hash object");
+    test_assert_m(result->data.hash.cnt == 0,
+                  "expected empty hash, evaluated %u pairs",
+                  result->data.hash.cnt);
+
+    scratch_end(scratch);
+  }
+
+  // string keys: {"one": 1, "two": 1 + 1, "three": 6 / 2}
+  {
+    TmpArena scratch = scratch_begin(0);
+
+    Parser p = parse(scratch.arena, str8_lit("{\"one\": 1, \"two\": 1 + 1, \"three\": 6 / 2}"));
+    test_helper(test_parse_check_messages(&p));
+
+    Env env = { 0 };
+    env_init(&env, scratch.arena, 0);
+
+    Object const *result = eval_program(scratch.arena, p.statements, &env);
+    test_assert_m(result->tag == ObjectKind_Hash, "expected hash object");
+    test_assert_m(result->data.hash.cnt == 3,
+                  "expected three hash pairs, evaluated %u",
+                  result->data.hash.cnt);
+
+    struct
+    {
+      Str8 key;
+      s64 expected;
+    } expected[] = {
+      { str8_lit("one"), 1 },
+      { str8_lit("two"), 2 },
+      { str8_lit("three"), 3 },
+    };
+
+    for (usize i = 0; i < arr_count(expected); i++)
+    {
+      Object const *key = object_from_string(scratch.arena, expected[i].key);
+      Object const *val = object_hash_get(&result->data.hash, key);
+      test_assert_m(val->tag == ObjectKind_Number, "expected number hash value");
+      test_assert_m(val->data.number.value == expected[i].expected,
+                    "expected hash value '%lld' for key '%.*s', evaluated '%lld'",
+                    expected[i].expected,
+                    str8_va(expected[i].key),
+                    val->data.number.value);
+    }
+
+    scratch_end(scratch);
+  }
+
+  // expression keys of every key type: {"th" + "ree": 3, 1 < 2: 5, 2 * 2: 16, fn() { 10 }(): 100}
+  // keys evaluate to: string "three", boolean true, number 4, number 10
+  {
+    TmpArena scratch = scratch_begin(0);
+
+    Parser p = parse(scratch.arena,
+                     str8_lit("{\"th\" + \"ree\": 3, 1 < 2: 5, 2 * 2: 16, fn() { 10 }(): 100}"));
+    test_helper(test_parse_check_messages(&p));
+
+    Env env = { 0 };
+    env_init(&env, scratch.arena, 0);
+
+    Object const *result = eval_program(scratch.arena, p.statements, &env);
+    test_assert_m(result->tag == ObjectKind_Hash, "expected hash object");
+    test_assert_m(result->data.hash.cnt == 4,
+                  "expected four hash pairs, evaluated %u",
+                  result->data.hash.cnt);
+
+    Object const *string_key = object_from_string(scratch.arena, str8_lit("three"));
+    Object const *string_val = object_hash_get(&result->data.hash, string_key);
+    test_assert_m(string_val->tag == ObjectKind_Number, "expected number hash value for string key");
+    test_assert_m(string_val->data.number.value == 3,
+                  "expected hash value '3' for string key, evaluated '%lld'",
+                  string_val->data.number.value);
+
+    Object const *bool_key = object_from_bool(true);
+    Object const *bool_val = object_hash_get(&result->data.hash, bool_key);
+    test_assert_m(bool_val->tag == ObjectKind_Number, "expected number hash value for boolean key");
+    test_assert_m(bool_val->data.number.value == 5,
+                  "expected hash value '5' for boolean key, evaluated '%lld'",
+                  bool_val->data.number.value);
+
+    Object const *number_key = object_from_number(scratch.arena, 4);
+    Object const *number_val = object_hash_get(&result->data.hash, number_key);
+    test_assert_m(number_val->tag == ObjectKind_Number, "expected number hash value for number key");
+    test_assert_m(number_val->data.number.value == 16,
+                  "expected hash value '16' for number key, evaluated '%lld'",
+                  number_val->data.number.value);
+
+    Object const *call_key = object_from_number(scratch.arena, 10);
+    Object const *call_val = object_hash_get(&result->data.hash, call_key);
+    test_assert_m(call_val->tag == ObjectKind_Number, "expected number hash value for call key");
+    test_assert_m(call_val->data.number.value == 100,
+                  "expected hash value '100' for call key, evaluated '%lld'",
+                  call_val->data.number.value);
+
+    scratch_end(scratch);
+  }
+
+  // duplicate keys overwrite: {1: 1, 1: 2}
+  {
+    TmpArena scratch = scratch_begin(0);
+
+    Parser p = parse(scratch.arena, str8_lit("{1: 1, 1: 2}"));
+    test_helper(test_parse_check_messages(&p));
+
+    Env env = { 0 };
+    env_init(&env, scratch.arena, 0);
+
+    Object const *result = eval_program(scratch.arena, p.statements, &env);
+    test_assert_m(result->tag == ObjectKind_Hash, "expected hash object");
+    test_assert_m(result->data.hash.cnt == 1,
+                  "expected one hash pair after overwrite, evaluated %u",
+                  result->data.hash.cnt);
+
+    Object const *key = object_from_number(scratch.arena, 1);
+    Object const *val = object_hash_get(&result->data.hash, key);
+    test_assert_m(val->tag == ObjectKind_Number, "expected number hash value");
+    test_assert_m(val->data.number.value == 2,
+                  "expected overwritten hash value '2', evaluated '%lld'",
+                  val->data.number.value);
+
+    scratch_end(scratch);
+  }
+
+  return 0;
+}
+
+internal int
+test_eval_index_expr_array(void)
 {
   struct
   {
@@ -5023,7 +5711,7 @@ test_eval_array_index_expr(void)
 }
 
 internal int
-test_eval_string_index_expr(void)
+test_eval_index_expr_string(void)
 {
   struct
   {
@@ -5063,6 +5751,60 @@ test_eval_string_index_expr(void)
                     "expected number value '%.*s', evaluated '%.*s'",
                     str8_va(tests[i].expected),
                     str8_va(result->data.string.value));
+    }
+
+    scratch_end(scratch);
+  }
+
+  return 0;
+}
+
+internal int
+test_eval_index_expr_hash(void)
+{
+  struct
+  {
+    Str8 input;
+    s64 expected;
+    b8 is_null;
+  } tests[] = {
+    { str8_lit("{\"foo\": 5}[\"foo\"]"), 5, false },
+    { str8_lit("{\"foo\": 5}[\"bar\"]"), 0, true },
+    { str8_lit("{}[\"foo\"]"), 0, true },
+    { str8_lit("{5: 5}[5]"), 5, false },
+    { str8_lit("{true: 5}[true]"), 5, false },
+    { str8_lit("{false: 5}[false]"), 5, false },
+    { str8_lit("{\"foo\": 5}[\"f\" + \"oo\"]"), 5, false },
+    { str8_lit("{1: 1, 2: 2}[1 + 1]"), 2, false },
+    { str8_lit("let key = \"foo\"; {\"foo\": 5}[key]"), 5, false },
+    { str8_lit("{\"foo\": 5}[fn() { \"foo\" }()]"), 5, false },
+  };
+
+  for (usize i = 0; i < arr_count(tests); i++)
+  {
+    TmpArena scratch = scratch_begin(0);
+
+    Parser p = parse(scratch.arena, tests[i].input);
+    test_helper(test_parse_check_messages(&p));
+
+    Env env = { 0 };
+    env_init(&env, scratch.arena, 0);
+
+    Object const *result = eval_program(scratch.arena, p.statements, &env);
+
+    if (tests[i].is_null)
+    {
+      test_assert_m(result->tag == ObjectKind_Null,
+                    "expected null object, evaluated '%.*s'",
+                    str8_va(object_name(result->tag)));
+    }
+    else
+    {
+      test_assert_m(result->tag == ObjectKind_Number, "expected number object");
+      test_assert_m(result->data.number.value == tests[i].expected,
+                    "expected number value '%lld', evaluated '%lld'",
+                    tests[i].expected,
+                    result->data.number.value);
     }
 
     scratch_end(scratch);
@@ -5456,8 +6198,32 @@ test_eval_error_handling(void)
       str8_lit("invalid array index type: String"),
     },
     {
+      str8_lit("{fn(){}:1}"),
+      str8_lit("invalid hash key type: Function"),
+    },
+    {
+      str8_lit("{{}:1}"),
+      str8_lit("invalid hash key type: Hash"),
+    },
+    {
+      str8_lit("{[]:1}"),
+      str8_lit("invalid hash key type: Array"),
+    },
+    {
       str8_lit("\"test\"[\"i\"]"),
       str8_lit("invalid string index type: String"),
+    },
+    {
+      str8_lit("{}[fn(){}]"),
+      str8_lit("invalid hash index type: Function"),
+    },
+    {
+      str8_lit("{}[{}]"),
+      str8_lit("invalid hash index type: Hash"),
+    },
+    {
+      str8_lit("{}[[]]"),
+      str8_lit("invalid hash index type: Array"),
     },
     {
       str8_lit("5[0]"),
@@ -5513,6 +6279,7 @@ test(void)
   result += test_parse_expr_call_args();
   result += test_parse_expr_string();
   result += test_parse_expr_array();
+  result += test_parse_expr_hash();
   result += test_parse_expr_index();
 
   result += test_parse_op_precedence();
@@ -5523,6 +6290,8 @@ test(void)
   result += test_env_outer_scope();
   result += test_env_grow();
 
+  result += test_object_hash();
+
   result += test_eval_number_expr();
   result += test_eval_boolean_expr();
   result += test_eval_bang();
@@ -5530,8 +6299,10 @@ test(void)
   result += test_eval_function_expr();
   result += test_eval_string_expr();
   result += test_eval_array_expr();
-  result += test_eval_array_index_expr();
-  result += test_eval_string_index_expr();
+  result += test_eval_hash_expr();
+  result += test_eval_index_expr_array();
+  result += test_eval_index_expr_string();
+  result += test_eval_index_expr_hash();
 
   result += test_eval_builtin_len();
   result += test_eval_builtin_rest();
