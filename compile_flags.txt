@@ -1,0 +1,3 @@
+-std=c11
+-Wno-gnu-zero-variadic-macro-arguments
+-Wno-undefined-internal

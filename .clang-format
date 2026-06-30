@@ -86,7 +86,7 @@ RemoveEmptyLinesInUnwrappedLines: true
 RemoveParentheses: Leave
 RemoveSemicolon: false
 SeparateDefinitionBlocks: Leave
-SortIncludes: CaseInsensitive
+SortIncludes: false
 SpaceAfterCStyleCast: false
 SpaceAfterLogicalNot: false
 SpaceAroundPointerQualifiers: Default

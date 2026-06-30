@@ -2,10 +2,16 @@
 
 SRC_DIR="$(dirname $0)"
 BIN_NAME="cmonkey"
+TEST_NAME="cmonkey.test"
 
-BUILD_FLAGS="-Wno-gnu-zero-variadic-macro-arguments"
+BUILD_FLAGS="-std=c11 -Wno-gnu-zero-variadic-macro-arguments -Wno-undefined-internal"
 LINT_STRICT_FLAGS="$BUILD_FLAGS -Wno-declaration-after-statement -Wno-pre-c11-compat -Wno-padded"
-LINT_LAX_FLAGS="$LINT_STRICT_FLAGS -Wno-unused-macros -Wno-switch-enum -Wno-covered-switch-default -Wno-poison-system-directories"
+LINT_LAX_FLAGS="$LINT_STRICT_FLAGS -Wno-switch-enum -Wno-covered-switch-default -Wno-poison-system-directories"
+
+build() {
+	mkdir -p $SRC_DIR/bin
+	clang $SRC_DIR/src/main.c -Wall -Wextra -Wpedantic $BUILD_FLAGS -o $SRC_DIR/bin/$BIN_NAME "$@"
+}
 
 slint() {
 	clang $SRC_DIR/src/main.c -fsyntax-only -Weverything $LINT_STRICT_FLAGS "$@"
@@ -15,9 +21,11 @@ lint() {
 	clang $SRC_DIR/src/main.c -fsyntax-only -Weverything $LINT_LAX_FLAGS "$@"
 }
 
-build() {
+test() {
 	mkdir -p $SRC_DIR/bin
-	clang $SRC_DIR/src/main.c -Wall -Wextra -Wpedantic $BUILD_FLAGS -o $SRC_DIR/bin/$BIN_NAME "$@"
+	clang $SRC_DIR/src/main.c -fsyntax-only -Wall -Wextra -Wpedantic $BUILD_FLAGS
+	clang $SRC_DIR/src/test.c -Wall -Wextra -Wpedantic $BUILD_FLAGS -o $SRC_DIR/bin/$TEST_NAME "$@"
+	$SRC_DIR/bin/$TEST_NAME
 }
 
 clean() {
@@ -28,26 +36,12 @@ run() {
 	build && $SRC_DIR/bin/$BIN_NAME "$@"
 }
 
-# _completions() {
-# 	cat <<EOF
-# # Commands
-# command : build   : Build the program
-# command : clean   : Clean build artifacts
-# command : run     : Build and run the program
-#
-# # Global flags
-# flag : --version : Show version
-# flag : -h        : Show help
-# flag : --help    : Show help
-# EOF
-# }
-
 case "${1:-}" in
-	build|lint|slint|clean|run)
+	build|lint|slint|test|clean|run)
 		"$@"
 		;;
-	--version)
-		echo "cmonkey run.sh version 1.0.0"
+	--info)
+		echo "cmonkey run.sh"
 		;;
 	*)
 		run "$@"
